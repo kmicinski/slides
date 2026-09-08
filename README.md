@@ -148,6 +148,7 @@ through untouched. Tools (`src/mcp.rs`):
 | `replace_slide` / `insert_slide` / `delete_slide` | edit one slide by position; separators are managed for you |
 | `list_themes` / `get_theme` | themes and their schemas with examples — the vocabulary |
 | `get_schema` / `put_schema` | one schema's CSS + example; write to add a slide design |
+| `get_proposal` / `await_review` / `withdraw_proposal` | review mode: see each op's status and the author's comments, wait for a decision, take an op back |
 
 Slides are addressed by their 1-based position in presentation order (the
 "n of m" the player shows). Slide edits are spliced into the source under the
@@ -160,6 +161,35 @@ claude mcp add --transport http slides https://slides.example.com/mcp \
   --header "Authorization: Bearer $SLIDES_MCP_TOKEN"
 ```
 
+## Review mode and the in-app agent
+
+Tool edits — over the API, the MCP endpoint, or from the agent — are
+**proposals** until the author accepts them. Every deck has a *review tool
+edits* switch in the editor header (on by default; `src/review.rs`):
+
+- A proposal is a list of per-slide operations (replace / insert / delete, or a
+  whole-deck replace). Each is anchored to the slide it targets by position
+  **and** a hash of that slide's source, so edits elsewhere in the deck leave it
+  valid, while editing the targeted slide makes it *stale* (reject or
+  re-propose; never merged).
+- The editor's **Review** tab lists the operations with the tool's `note`, a
+  line diff, and accept / reject / comment. Clicking one jumps the editor to the
+  slide and switches the preview to the **proposed deck** (current text with
+  every pending op applied); a dashed outline and a badge mark that state.
+  Comments are for the agent: `get_proposal` returns them, `await_review`
+  blocks until the author acts, `withdraw_proposal` takes an op back.
+- Accepting splices the change through the same code the direct tools use;
+  nothing else in the proposal moves. State lives in `decks/<name>/.slides.json`.
+
+**✦ Ask** opens a chat with an agent that edits the deck for you
+(`src/agent.rs`). It is a headless `claude -p` run whose only tools are this
+server's own MCP endpoint over loopback, so in review mode its edits arrive as
+proposals in the same panel; the cursor's slide is passed as context. One
+conversation per deck, resumed across messages (`--resume`; transcripts under
+`$HOME/.claude`). It needs `SLIDES_MCP_TOKEN`, a `claude` binary on `PATH`
+with OAuth credentials in `$HOME`, and picks its model from
+`SLIDES_AGENT_MODEL` (default `claude-opus-5`). Endpoints in `src/api.rs`.
+
 ## Running it for real
 
 ```
@@ -170,7 +200,7 @@ binds 127.0.0.1:7100; put a reverse proxy with TLS in front. The password
 gates editing and the API; players are public. Sessions live in memory, so a
 restart logs everyone out. Environment: `SLIDES_ROOT` (default `.`),
 `SLIDES_BIND` (default `127.0.0.1:7100`), `SLIDES_PASSWORD` (unset ⇒ read-only),
-`SLIDES_MCP_TOKEN` (unset ⇒ no MCP).
+`SLIDES_MCP_TOKEN` (unset ⇒ no MCP), `SLIDES_AGENT_MODEL` (the ✦ Ask agent's model).
 
 Behind a proxy that does its own login (Authelia, oauth2-proxy, …), set
 `TRUST_PROXY_AUTH=true` instead of a password: any request carrying a

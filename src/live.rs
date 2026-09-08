@@ -16,6 +16,9 @@
 //!                                                   every slide's first line; bodies only where the
 //!                                                   slide differs from what this connection last got
 //!   {"type":"saved","error"?}                       the debounced write to disk finished
+//!   {"type":"state","state"}                        review state (proposal ops, agent transcript) —
+//!                                                   on `sync` and whenever it changes (`review.rs`)
+//!   {"type":"agent","event"}                        a live event from the in-app agent (`agent.rs`)
 //! client → server
 //!   {"type":"sync"}                                 become an editor: get the text, forwarded edits,
 //!                                                   and body-less patches (the editor only needs lines)
@@ -23,6 +26,8 @@
 //!                                                   Monaco's content changes (UTF-16 offsets, each
 //!                                                   relative to the text before the whole batch) and
 //!                                                   an FNV-1a hash of the resulting text
+//!   {"type":"view","proposed"}                      preview switch: patch from the proposed deck
+//!                                                   (current text + pending proposal) or the real one
 //! ```
 //!
 //! Patches are positional: a connection remembers the deck it last sent and a
@@ -36,16 +41,18 @@
 
 use crate::deck::{Deck, Diagnostic, Renderer, Slide};
 use crate::player;
+use crate::review::{self, DeckState};
 use crate::theme::Theme;
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use std::{fs, io};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edit {
@@ -62,30 +69,45 @@ pub enum Change {
 pub enum Update {
     Changed {
         deck: Arc<Deck>,
+        proposed: Option<Arc<Deck>>,
         change: Change,
         origin: u64,
     },
     Saved(Option<String>),
+    /// The proposal changed (or the text under it did): the proposed deck, if
+    /// any, and the review state view for editors.
+    Proposal {
+        deck: Option<Arc<Deck>>,
+        view: Arc<Value>,
+    },
+    Agent(Arc<Value>),
 }
 
 /// Handle to a deck's live state; clones share it.
 #[derive(Clone)]
 pub struct Doc(Arc<Mutex<Inner>>);
 
-struct Inner {
+pub(crate) struct Inner {
     root: PathBuf,
-    name: String,
-    text: String,
+    pub(crate) name: String,
+    pub(crate) text: String,
     version: u64,
     renderer: Renderer,
     deck: Arc<Deck>,
-    tx: broadcast::Sender<Arc<Update>>,
+    pub(crate) tx: broadcast::Sender<Arc<Update>>,
+    /// Review mode, the open proposal and the agent transcript (`review.rs`).
+    pub(crate) state: DeckState,
+    /// Current text with the pending proposal applied; `None` when nothing is pending.
+    pub(crate) proposed: Option<Arc<Deck>>,
+    /// Bumped on every review-state change; `await_review` waits on it.
+    pub(crate) rev: watch::Sender<u64>,
 }
 
 impl Doc {
     /// Loads `decks/<name>/deck.md` and (re)writes its player.
     pub fn open(root: &Path, name: &str) -> io::Result<Doc> {
-        let text = fs::read_to_string(root.join("decks").join(name).join("deck.md"))?;
+        let dir = root.join("decks").join(name);
+        let text = fs::read_to_string(dir.join("deck.md"))?;
         let mut renderer = Renderer::default();
         let deck = Arc::new(renderer.render(&text));
         let inner = Inner {
@@ -96,11 +118,18 @@ impl Doc {
             renderer,
             deck,
             tx: broadcast::channel(64).0,
+            state: review::load(&dir),
+            proposed: None,
+            rev: watch::channel(0).0,
         };
         if let Err(e) = inner.write_player() {
             eprintln!("deck {name}: {e:#}");
         }
-        Ok(Doc(Arc::new(Mutex::new(inner))))
+        let doc = Doc(Arc::new(Mutex::new(inner)));
+        let mut g = doc.lock();
+        doc.recompute_proposed(&mut g);
+        drop(g);
+        Ok(doc)
     }
 
     pub fn create(root: &Path, name: &str, text: &str) -> io::Result<Doc> {
@@ -110,8 +139,21 @@ impl Doc {
         Doc::open(root, name)
     }
 
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.0.lock().unwrap()
+    }
+
     pub fn deck(&self) -> Arc<Deck> {
         self.0.lock().unwrap().deck.clone()
+    }
+
+    pub fn proposed(&self) -> Option<Arc<Deck>> {
+        self.0.lock().unwrap().proposed.clone()
+    }
+
+    pub fn broadcast_agent(&self, event: Value) {
+        let g = self.0.lock().unwrap();
+        let _ = g.tx.send(Arc::new(Update::Agent(Arc::new(event))));
     }
 
     pub fn text(&self) -> String {
@@ -161,14 +203,26 @@ impl Doc {
         Ok(g.deck.clone())
     }
 
-    fn commit(&self, g: &mut Inner, change: Change, origin: u64) {
+    pub(crate) fn commit(&self, g: &mut Inner, change: Change, origin: u64) {
         g.deck = Arc::new(g.renderer.render(&g.text));
         g.version += 1;
+        // The proposed deck is derived from the text, so it moves with it.
+        self.recompute_proposed(g);
         let _ = g.tx.send(Arc::new(Update::Changed {
             deck: g.deck.clone(),
+            proposed: g.proposed.clone(),
             change,
             origin,
         }));
+        if g.state.proposal.is_some() {
+            // Positions and staleness in the review panel depend on the text.
+            let proposed = review::proposed_text(&g.text, g.ops());
+            let view = Arc::new(review::view(&g.text, &g.state, &proposed));
+            let _ = g.tx.send(Arc::new(Update::Proposal {
+                deck: g.proposed.clone(),
+                view,
+            }));
+        }
         let (doc, version) = (self.clone(), g.version);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -186,7 +240,7 @@ impl Doc {
 }
 
 impl Inner {
-    fn dir(&self) -> PathBuf {
+    pub(crate) fn dir(&self) -> PathBuf {
         self.root.join("decks").join(&self.name)
     }
 
@@ -229,6 +283,7 @@ pub fn fnv1a(s: &str) -> u32 {
 enum ClientMsg {
     Sync,
     Edit { changes: Vec<Edit>, hash: u32 },
+    View { proposed: bool },
 }
 
 #[derive(Serialize)]
@@ -246,6 +301,12 @@ enum ServerMsg<'a> {
     },
     Saved {
         error: &'a Option<String>,
+    },
+    State {
+        state: &'a Value,
+    },
+    Agent {
+        event: &'a Value,
     },
 }
 
@@ -299,6 +360,7 @@ async fn run(socket: WebSocket, doc: Doc) -> Result<(), axum::Error> {
     let mut rx = doc.subscribe();
     let (mut sink, mut stream) = socket.split();
     let mut editor = false;
+    let mut proposed_view = false;
     let mut prev = Arc::new(Deck::default());
     let deck = doc.deck();
     sink.send(message(&patch(&prev, &deck, true))).await?;
@@ -313,6 +375,13 @@ async fn run(socket: WebSocket, doc: Doc) -> Result<(), axum::Error> {
                     Ok(ClientMsg::Sync) => {
                         editor = true;
                         sink.send(message(&ServerMsg::Text { text: &doc.text() })).await?;
+                        sink.send(message(&ServerMsg::State { state: &doc.state_view() })).await?;
+                    }
+                    Ok(ClientMsg::View { proposed }) => {
+                        proposed_view = proposed;
+                        let deck = if proposed { doc.proposed().unwrap_or_else(|| doc.deck()) } else { doc.deck() };
+                        sink.send(message(&patch(&prev, &deck, !editor))).await?;
+                        prev = deck;
                     }
                     Ok(ClientMsg::Edit { changes, hash }) => {
                         if !doc.edit(&changes, hash, id) {
@@ -324,17 +393,33 @@ async fn run(socket: WebSocket, doc: Doc) -> Result<(), axum::Error> {
             }
             update = rx.recv() => match update {
                 Ok(update) => match &*update {
-                    Update::Changed { deck, change, origin } => {
+                    Update::Changed { deck, proposed, change, origin } => {
                         if editor && *origin != id {
                             sink.send(message(&match change {
                                 Change::Delta(changes) => ServerMsg::Edit { changes },
                                 Change::Text(text) => ServerMsg::Text { text },
                             })).await?;
                         }
-                        sink.send(message(&patch(&prev, deck, !editor))).await?;
-                        prev = deck.clone();
+                        let shown = if proposed_view { proposed.as_ref().unwrap_or(deck) } else { deck };
+                        sink.send(message(&patch(&prev, shown, !editor))).await?;
+                        prev = shown.clone();
                     }
                     Update::Saved(error) => sink.send(message(&ServerMsg::Saved { error })).await?,
+                    Update::Proposal { deck, view } => {
+                        if editor {
+                            sink.send(message(&ServerMsg::State { state: view })).await?;
+                        }
+                        if proposed_view {
+                            let shown = deck.clone().unwrap_or_else(|| doc.deck());
+                            sink.send(message(&patch(&prev, &shown, !editor))).await?;
+                            prev = shown;
+                        }
+                    }
+                    Update::Agent(event) => {
+                        if editor {
+                            sink.send(message(&ServerMsg::Agent { event })).await?;
+                        }
+                    }
                 },
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     // Missed updates: resend the current state wholesale.

@@ -72,8 +72,12 @@ function apply(cols: PatchSlide[][]) {
   }
 }
 
+let ws: WebSocket | null = null;
+let proposed = false; // which deck this preview shows (see `view` in src/live.rs)
+
 function connect() {
-  const ws = new WebSocket(socketUrl());
+  ws = new WebSocket(socketUrl());
+  ws.onopen = () => { if (proposed) ws?.send(JSON.stringify({ type: "view", proposed })); };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data) as ServerMsg;
     if (m.type === "patch") apply(m.cols);
@@ -82,7 +86,12 @@ function connect() {
 }
 
 window.addEventListener("message", (e) => {
-  if (e.origin === location.origin && e.data?.type === "goto") Reveal.slide(e.data.h, e.data.v);
+  if (e.origin !== location.origin) return;
+  if (e.data?.type === "goto") Reveal.slide(e.data.h, e.data.v);
+  if (e.data?.type === "view") {
+    proposed = !!e.data.proposed;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "view", proposed }));
+  }
 });
 
 // ---- click → source line ------------------------------------------------------

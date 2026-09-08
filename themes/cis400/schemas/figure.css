@@ -1,0 +1,36 @@
+/* ---------- Figures: inline SVG diagrams in the theme's palette ---------- */
+/* Author the SVG with class names, not colours; fragments work on <g>/<tspan>. */
+
+.reveal .figure { width: 100%; margin: 0.35em auto; }
+.reveal .figure.narrow { width: 86%; }
+.reveal .figure svg {
+  display: block; width: 100%; height: auto; overflow: visible;
+  font-family: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+.reveal .figure text { font-size: 26px; fill: var(--su-text); }
+.reveal .figure .fig-title { font-weight: 800; fill: var(--su-navy); }
+.reveal .figure .fig-small { font-size: 21px; fill: var(--su-muted); font-weight: 400; }
+.reveal .figure .fig-mono { font-family: "JetBrains Mono", Menlo, Consolas, monospace; font-size: 23px; }
+.reveal .figure .sub { font-size: 65%; baseline-shift: sub; }
+.reveal .figure .fig-num { font-weight: 800; fill: var(--su-orange); }
+.reveal .figure .fig-orange { fill: var(--su-orange-deep); font-weight: 700; }
+.reveal .figure .fig-navy { fill: var(--su-navy); font-weight: 700; }
+.reveal .figure .fig-signal { fill: var(--su-signal-deep); font-weight: 700; }
+.reveal .figure .fig-danger { fill: var(--su-danger); font-weight: 700; }
+
+.reveal .figure .fig-box { fill: #fff; stroke: var(--su-navy); stroke-width: 3; }
+.reveal .figure .fig-box.model { fill: #fff4ec; stroke: var(--su-orange); }
+.reveal .figure .fig-box.world { fill: #e9f6f8; stroke: var(--su-signal-deep); }
+.reveal .figure .fig-box.ctx { fill: var(--su-page-soft); stroke: var(--su-muted); }
+
+.reveal .figure .fig-arrow { fill: none; stroke: var(--su-navy); stroke-width: 3.5; stroke-linecap: round; }
+.reveal .figure .fig-arrow.model { stroke: var(--su-orange); }
+.reveal .figure .fig-arrow.world { stroke: var(--su-signal-deep); }
+.reveal .figure .fig-arrow.muted { stroke: var(--su-muted); }
+.reveal .figure .fig-boundary { fill: none; stroke: var(--su-danger); stroke-width: 3; stroke-dasharray: 12 10; }
+.reveal .figure .fig-boundary.muted { stroke: var(--su-rule); }
+
+/* A compact comparison table next to / instead of a figure */
+.reveal table.figure-table { font-size: 0.72em; border-collapse: collapse; width: 100%; margin: 0.3em 0; }
+.reveal table.figure-table th, .reveal table.figure-table td { padding: 0.3em 0.6em; border-bottom: 1px solid var(--su-rule); text-align: left; vertical-align: top; }
+.reveal table.figure-table th { color: var(--su-navy); }

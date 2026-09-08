@@ -18,6 +18,8 @@ COPY --from=web /web/dist ./web/dist
 RUN cargo build --release
 
 FROM debian:bookworm-slim
+# git + certs: the in-app agent runs the (bind-mounted) `claude` CLI, which expects them.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN useradd -u 1000 -m slides
 WORKDIR /app
 COPY --from=build /build/target/release/slides /usr/local/bin/slides

@@ -17,6 +17,7 @@ pub async fn static_file(Path(file): Path<String>) -> Response {
         "editor.js" => ("text/javascript", include_str!("../web/dist/editor.js")),
         "live.js" => ("text/javascript", include_str!("../web/dist/live.js")),
         "protocol.js" => ("text/javascript", include_str!("../web/dist/protocol.js")),
+        "review.js" => ("text/javascript", include_str!("../web/dist/review.js")),
         "editor.css" => ("text/css", include_str!("../web/editor.css")),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
@@ -91,8 +92,27 @@ pub async fn editor(
 </head>
 <body data-deck="{name}">
 <header><a href="/">decks</a><strong>{name}</strong><span id="status"></span><span class="spacer"></span>
+<label class="toggle" title="When on, edits made by tools (MCP clients, the agent) are queued as proposals you accept or reject"><input type="checkbox" id="review-mode" checked> review tool edits</label>
+<button id="open-ask" class="ask">✦ Ask</button><button id="open-review">proposals <span id="pcount2" class="count" hidden></span></button>
 <a href="/deck/{name}/" target="_blank">player</a><a href="/deck/{name}/live" target="_blank">live view</a><a href="/deck/{name}/export.zip">export</a></header>
-<main><div id="editor"></div><div id="divider"></div><iframe id="preview" src="/deck/{name}/live"></iframe></main>
+<main>
+<div id="editor"></div><div id="divider"></div>
+<div id="preview-pane"><iframe id="preview" src="/deck/{name}/live"></iframe><div id="preview-badge" hidden>proposed</div></div>
+<aside id="drawer" hidden>
+  <nav><button data-tab="ask" class="active">✦ Ask</button><button data-tab="review">Review <span id="pcount" class="count" hidden></span></button><span class="spacer"></span><button id="drawer-close" title="close">×</button></nav>
+  <section id="tab-ask">
+    <div id="transcript"></div>
+    <form id="ask-form">
+      <textarea id="ask-input" rows="3" placeholder="What should change? Enter sends, Shift+Enter for a newline."></textarea>
+      <div class="row"><span id="ask-context" class="muted"></span><span class="spacer"></span><button type="button" id="ask-stop" hidden>stop</button><button type="button" id="ask-new" title="start a fresh conversation">new</button><button type="submit" id="ask-send">send</button></div>
+    </form>
+  </section>
+  <section id="tab-review" hidden>
+    <div class="row"><label><input type="checkbox" id="show-proposed"> show proposed deck in the preview</label><span class="spacer"></span><button id="clear-resolved">clear resolved</button></div>
+    <div id="ops"></div>
+  </section>
+</aside>
+</main>
 <script type="module" src="/static/editor.js"></script>
 </body></html>"#
     )))

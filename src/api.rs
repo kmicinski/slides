@@ -11,16 +11,29 @@
 //! PUT  /api/themes/{theme}/schemas/{schema}  ← {css, example}   writes both files; reload pages to see it
 //! ```
 //!
+//! Review mode and the in-app agent (used by the editor's drawer; JSON in, JSON out):
+//!
+//! ```text
+//! GET  /api/decks/{name}/state                     → review state view (see review.rs)
+//! PUT  /api/decks/{name}/review        ← {review}  toggle review mode for the deck
+//! POST /api/decks/{name}/proposal/{op}/{action}    accept | reject | comment {comment} | withdraw
+//! POST /api/decks/{name}/proposal/clear            drop resolved ops
+//! POST /api/decks/{name}/agent         ← {message, slide?}   start an agent run
+//! POST /api/decks/{name}/agent/stop, /agent/reset
+//! ```
+//!
 //! Authenticate with the session cookie or `Authorization: Bearer <SLIDES_PASSWORD>`.
 
 use crate::deck::Diagnostic;
+use crate::review::{Action, Kind};
 use crate::theme::{self, Theme};
-use crate::{Shared, valid_name};
+use crate::{Shared, agent, valid_name};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::fs;
 
 type ApiResult<T> = Result<T, (StatusCode, String)>;
@@ -68,8 +81,25 @@ pub async fn put_deck(
     State(app): State<Shared>,
     Path(name): Path<String>,
     text: String,
-) -> ApiResult<Json<PutResult>> {
+) -> ApiResult<Response> {
     let deck = match app.doc(&name) {
+        Some(doc) if doc.review() => {
+            // Review mode: the whole-deck write is queued for the author instead.
+            let op = doc
+                .propose(
+                    Kind::Deck,
+                    None,
+                    false,
+                    text,
+                    "replaced the whole deck via PUT /api".into(),
+                )
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({ "proposed": true, "op": op })),
+            )
+                .into_response());
+        }
         Some(doc) => doc.replace(text, 0),
         None => app
             .create(&name, &text)
@@ -79,7 +109,143 @@ pub async fn put_deck(
     Ok(Json(PutResult {
         slides: deck.count(),
         diagnostics: deck.diagnostics.clone(),
-    }))
+    })
+    .into_response())
+}
+
+// ---- review mode + agent ----------------------------------------------------
+
+fn doc_of(app: &Shared, name: &str) -> ApiResult<crate::live::Doc> {
+    app.doc(name)
+        .ok_or((StatusCode::NOT_FOUND, "no such deck".into()))
+}
+
+pub async fn get_state(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(doc_of(&app, &name)?.state_view()))
+}
+
+#[derive(Deserialize)]
+pub struct ReviewFlag {
+    review: bool,
+}
+
+pub async fn put_review(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+    Json(f): Json<ReviewFlag>,
+) -> ApiResult<StatusCode> {
+    doc_of(&app, &name)?.set_review(f.review);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, Default)]
+pub struct OpBody {
+    #[serde(default)]
+    comment: String,
+}
+
+pub async fn op_action(
+    State(app): State<Shared>,
+    Path((name, op, action)): Path<(String, u32, String)>,
+    Json(body): Json<OpBody>,
+) -> ApiResult<Json<Value>> {
+    let doc = doc_of(&app, &name)?;
+    let action = match action.as_str() {
+        "accept" => Action::Accept,
+        "reject" => Action::Reject,
+        "comment" => Action::Comment(body.comment),
+        "withdraw" => Action::Withdraw,
+        _ => return Err((StatusCode::NOT_FOUND, "no such action".into())),
+    };
+    doc.resolve(op, action)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(doc.state_view()))
+}
+
+pub async fn clear_resolved(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let doc = doc_of(&app, &name)?;
+    doc.clear_resolved();
+    Ok(Json(doc.state_view()))
+}
+
+#[derive(Deserialize)]
+pub struct AgentMessage {
+    message: String,
+    #[serde(default)]
+    slide: Option<usize>,
+}
+
+pub async fn agent_send(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+    Json(m): Json<AgentMessage>,
+) -> ApiResult<StatusCode> {
+    let doc = doc_of(&app, &name)?;
+    let message = m.message.trim().to_string();
+    if message.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "empty message".into()));
+    }
+    let mut context = format!("- Date: {}\n", date_today());
+    if let Some(s) = m.slide {
+        let text = doc.text();
+        let heading = crate::review::sources(&text)
+            .get(s.wrapping_sub(1))
+            .and_then(|src| crate::mcp::heading(src))
+            .unwrap_or_default();
+        context += &format!(
+            "- The author's cursor is on slide {s}{}\n",
+            if heading.is_empty() {
+                String::new()
+            } else {
+                format!(" ({heading})")
+            }
+        );
+    }
+    agent::start(app.clone(), doc, name, message, context)
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Today as YYYY-MM-DD (UTC) for the agent's prompt; civil-from-days, no chrono.
+fn date_today() -> String {
+    let z = (crate::review::now() / 86400) as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+pub async fn agent_stop(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    doc_of(&app, &name)?;
+    Ok(if app.agent.stop(&name) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    })
+}
+
+pub async fn agent_reset(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    let doc = doc_of(&app, &name)?;
+    app.agent.stop(&name);
+    doc.agent_reset();
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn themes(State(app): State<Shared>) -> ApiResult<Json<Vec<Theme>>> {

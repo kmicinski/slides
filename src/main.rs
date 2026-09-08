@@ -14,8 +14,10 @@
 //! `SLIDES_PASSWORD` (unset ⇒ read-only: players are served, editing refuses),
 //! `TRUST_PROXY_AUTH=true` (the proxy's `Remote-User` header is the login;
 //! see `auth.rs`), `SLIDES_MCP_TOKEN` (bearer token for the `/mcp` endpoint;
-//! unset ⇒ disabled; see `mcp.rs`).
+//! unset ⇒ disabled; see `mcp.rs`), `SLIDES_AGENT_MODEL` (the in-app agent's
+//! model; see `agent.rs`).
 
+mod agent;
 mod api;
 mod auth;
 mod deck;
@@ -23,9 +25,10 @@ mod live;
 mod mcp;
 mod pages;
 mod player;
+mod review;
 mod theme;
 
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Router, middleware};
 use live::Doc;
 use std::collections::{BTreeMap, HashSet};
@@ -39,6 +42,7 @@ pub struct App {
     pub password: Option<String>,
     pub trust_proxy: bool,
     pub mcp_token: Option<String>,
+    pub agent: agent::Agent,
     pub sessions: Mutex<HashSet<String>>,
     pub docs: Mutex<BTreeMap<String, Doc>>,
 }
@@ -85,11 +89,14 @@ pub fn valid_name(name: &str) -> bool {
 async fn main() -> anyhow::Result<()> {
     let root =
         PathBuf::from(env::var("SLIDES_ROOT").unwrap_or_else(|_| ".".into())).canonicalize()?;
+    let bind = env::var("SLIDES_BIND").unwrap_or_else(|_| "127.0.0.1:7100".into());
+    let mcp_token = env::var("SLIDES_MCP_TOKEN").ok().filter(|t| !t.is_empty());
     let app: Shared = Arc::new(App {
         root,
         password: env::var("SLIDES_PASSWORD").ok().filter(|p| !p.is_empty()),
         trust_proxy: env::var("TRUST_PROXY_AUTH").is_ok_and(|v| v == "true" || v == "1"),
-        mcp_token: env::var("SLIDES_MCP_TOKEN").ok().filter(|t| !t.is_empty()),
+        agent: agent::Agent::new(&bind, mcp_token.as_deref()),
+        mcp_token,
         sessions: Default::default(),
         docs: Default::default(),
     });
@@ -116,6 +123,20 @@ async fn main() -> anyhow::Result<()> {
         .route("/edit/{name}", get(pages::editor))
         .route("/api/decks", get(api::decks))
         .route("/api/decks/{name}", get(api::get_deck).put(api::put_deck))
+        // Review mode + the in-app agent (the editor's drawer; see review.rs, agent.rs)
+        .route("/api/decks/{name}/state", get(api::get_state))
+        .route("/api/decks/{name}/review", put(api::put_review))
+        .route(
+            "/api/decks/{name}/proposal/clear",
+            post(api::clear_resolved),
+        )
+        .route(
+            "/api/decks/{name}/proposal/{op}/{action}",
+            post(api::op_action),
+        )
+        .route("/api/decks/{name}/agent", post(api::agent_send))
+        .route("/api/decks/{name}/agent/stop", post(api::agent_stop))
+        .route("/api/decks/{name}/agent/reset", post(api::agent_reset))
         .route("/api/themes", get(api::themes))
         .route(
             "/api/themes/{theme}/schemas/{schema}",
@@ -135,10 +156,9 @@ async fn main() -> anyhow::Result<()> {
         .nest_service("/themes", ServeDir::new(app.root.join("themes")))
         .with_state(app.clone());
 
-    let bind = env::var("SLIDES_BIND").unwrap_or_else(|_| "127.0.0.1:7100".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     eprintln!(
-        "slides: {} deck(s) under {}, {}, MCP {} — http://{bind}/",
+        "slides: {} deck(s) under {}, {}, MCP {}, agent {} — http://{bind}/",
         app.docs.lock().unwrap().len(),
         app.root.display(),
         if app.trust_proxy {
@@ -152,6 +172,10 @@ async fn main() -> anyhow::Result<()> {
             "on"
         } else {
             "off (set SLIDES_MCP_TOKEN)"
+        },
+        match app.agent.available() {
+            Ok(_) => format!("on ({})", app.agent.model),
+            Err(e) => format!("off ({e})"),
         }
     );
     axum::serve(listener, router).await?;

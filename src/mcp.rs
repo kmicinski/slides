@@ -13,8 +13,14 @@
 //! goes through the live document like the editor's do: open editors and
 //! previews update at once, the deck is rendered immediately and the render
 //! diagnostics come back in the reply.
+//!
+//! In *review mode* (the default; `review.rs`) the write tools do not change the
+//! deck: each call queues a proposal the author accepts or rejects in the
+//! editor. The reply says so (`proposed: true`), `get_proposal` reports each
+//! op's status and the author's comments, and `await_review` waits for them.
 
 use crate::deck::{self, Deck, Diagnostic, Renderer};
+use crate::review::Kind;
 use crate::theme::{self, Theme};
 use crate::{Shared, api};
 use axum::extract::State;
@@ -122,7 +128,7 @@ pub async fn handler(State(app): State<Shared>, headers: HeaderMap, body: String
         ),
         "ping" => ok(id, json!({})),
         "tools/list" => ok(id, json!({ "tools": tool_catalog() })),
-        "tools/call" => match tools_call(&app, req.params) {
+        "tools/call" => match tools_call(&app, req.params).await {
             Ok(v) => ok(id, tool_text(&v)),
             Err(msg) => ok(id, tool_error(&msg)),
         },
@@ -161,6 +167,7 @@ fn tool_catalog() -> Vec<Value> {
     let name = json!({ "type": "string", "description": "Theme name." });
     let schema =
         json!({ "type": "string", "description": "Schema name (the CSS class it styles)." });
+    let note = json!({ "type": "string", "description": "One sentence for the author: what changed and why. Shown next to the diff in review mode." });
     let obj = |props: Value, required: &[&str]| json!({ "type": "object", "properties": props, "required": required });
     vec![
         json!({
@@ -175,8 +182,8 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "put_deck",
-            "description": "Replace a deck's entire deck.md (creates the deck if it does not exist). Every open editor and preview updates at once. Returns the render diagnostics — read them. Prefer replace_slide for local edits.",
-            "inputSchema": obj(json!({ "deck": deck, "source": { "type": "string", "description": "Complete deck.md text." } }), &["deck", "source"])
+            "description": "Replace a deck's entire deck.md (creates the deck if it does not exist). Every open editor and preview updates at once. Returns the render diagnostics — read them. Prefer replace_slide for local edits. In review mode this queues a whole-deck proposal.",
+            "inputSchema": obj(json!({ "deck": deck, "source": { "type": "string", "description": "Complete deck.md text." }, "note": note }), &["deck", "source"])
         }),
         json!({
             "name": "check_deck",
@@ -195,18 +202,33 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "replace_slide",
-            "description": "Replace the source of one slide. `source` is the slide's markdown only — no `---`/`--` separators; include `<!-- .slide: … -->` attributes and any `Note:` section as part of it. Returns the deck's diagnostics.",
-            "inputSchema": obj(json!({ "deck": deck, "slide": slide, "source": { "type": "string" } }), &["deck", "slide", "source"])
+            "description": "Replace the source of one slide. `source` is the slide's markdown only — no `---`/`--` separators; include `<!-- .slide: … -->` attributes and any `Note:` section as part of it. Returns the deck's diagnostics. In review mode the change is queued as a proposal (reply has `proposed: true`).",
+            "inputSchema": obj(json!({ "deck": deck, "slide": slide, "source": { "type": "string" }, "note": note }), &["deck", "slide", "source"])
         }),
         json!({
             "name": "insert_slide",
             "description": "Insert a new slide after position `after` (0 = before the first slide). `vertical: true` makes it a sub-slide (`--`) of the slide it follows; otherwise it starts a new column (`---`). `source` is the slide's markdown, without separators.",
-            "inputSchema": obj(json!({ "deck": deck, "after": { "type": "integer", "description": "Position of the slide to insert after; 0 inserts at the top." }, "source": { "type": "string" }, "vertical": { "type": "boolean" } }), &["deck", "after", "source"])
+            "inputSchema": obj(json!({ "deck": deck, "after": { "type": "integer", "description": "Position of the slide to insert after; 0 inserts at the top." }, "source": { "type": "string" }, "vertical": { "type": "boolean" }, "note": note }), &["deck", "after", "source"])
         }),
         json!({
             "name": "delete_slide",
             "description": "Delete one slide (and the separator that followed it). A deck keeps at least one slide.",
-            "inputSchema": obj(json!({ "deck": deck, "slide": slide }), &["deck", "slide"])
+            "inputSchema": obj(json!({ "deck": deck, "slide": slide, "note": note }), &["deck", "slide"])
+        }),
+        json!({
+            "name": "get_proposal",
+            "description": "Review state of a deck: whether review mode is on, and every proposed op with its status (pending / accepted / rejected), whether it went stale (the author edited that slide), and the author's comment asking for changes. Check this before revising work the author has commented on.",
+            "inputSchema": obj(json!({ "deck": deck }), &["deck"])
+        }),
+        json!({
+            "name": "await_review",
+            "description": "Wait (up to `timeout` seconds, default 120) until the author acts on the proposal — accepts, rejects or comments — then return the review state. Use it after proposing changes when you want to respond to the author's decisions in the same session.",
+            "inputSchema": obj(json!({ "deck": deck, "timeout": { "type": "integer" } }), &["deck"])
+        }),
+        json!({
+            "name": "withdraw_proposal",
+            "description": "Withdraw one pending op (`op`), or every pending op of the deck's proposal when `op` is omitted.",
+            "inputSchema": obj(json!({ "deck": deck, "op": { "type": "integer" } }), &["deck"])
         }),
         json!({
             "name": "list_themes",
@@ -238,16 +260,16 @@ fn tool_catalog() -> Vec<Value> {
 /// hands the renderer: it begins with the blank line after the separator
 /// (except for the first slide) and ends just before the next separator line
 /// (or at the end of the text).
-struct Region {
-    index: usize,
-    column: usize,
-    row: usize,
-    line: usize,
-    start: usize,
-    end: usize,
+pub(crate) struct Region {
+    pub index: usize,
+    pub column: usize,
+    pub row: usize,
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
 }
 
-fn regions(src: &str) -> Vec<Region> {
+pub(crate) fn regions(src: &str) -> Vec<Region> {
     let base = src.as_ptr() as usize;
     let mut out = Vec::new();
     for (c, column) in deck::split(src).into_iter().enumerate() {
@@ -283,7 +305,7 @@ fn separator(src: &str, at: usize) -> &str {
     &rest[..rest.find('\n').map_or(rest.len(), |n| n + 1)]
 }
 
-fn heading(md: &str) -> Option<String> {
+pub(crate) fn heading(md: &str) -> Option<String> {
     md.lines()
         .map(str::trim)
         .find(|l| l.starts_with('#'))
@@ -320,17 +342,23 @@ struct SlideArg {
     slide: usize,
     #[serde(default)]
     html: bool,
+    #[serde(default)]
+    note: String,
 }
 #[derive(Deserialize)]
 struct SourceArg {
     deck: String,
     source: String,
+    #[serde(default)]
+    note: String,
 }
 #[derive(Deserialize)]
 struct ReplaceArg {
     deck: String,
     slide: usize,
     source: String,
+    #[serde(default)]
+    note: String,
 }
 #[derive(Deserialize)]
 struct InsertArg {
@@ -339,6 +367,8 @@ struct InsertArg {
     source: String,
     #[serde(default)]
     vertical: bool,
+    #[serde(default)]
+    note: String,
 }
 #[derive(Deserialize)]
 struct ThemeArg {
@@ -365,7 +395,21 @@ fn doc(app: &Shared, name: &str) -> Result<crate::live::Doc, String> {
     app.doc(name).ok_or_else(|| format!("no such deck: {name}"))
 }
 
-fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
+/// A queued proposal, as the tool reply: the op plus the proposed deck's diagnostics.
+fn proposed(doc: &crate::live::Doc, op: Value) -> Value {
+    let diagnostics = doc
+        .proposed()
+        .map(|d| d.diagnostics.clone())
+        .unwrap_or_default();
+    json!({
+        "proposed": true,
+        "message": "review mode: queued for the author to accept or reject in the editor; nothing changed yet",
+        "op": op,
+        "diagnostics": diagnostics,
+    })
+}
+
+async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -400,6 +444,10 @@ fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
         "put_deck" => {
             let a: SourceArg = parse(&args)?;
             let deck = match app.doc(&a.deck) {
+                Some(doc) if doc.review() => {
+                    let op = doc.propose(Kind::Deck, None, false, a.source, a.note)?;
+                    return Ok(proposed(&doc, op));
+                }
                 Some(doc) => doc.replace(a.source, 0),
                 None => app
                     .create(&a.deck, &a.source)
@@ -468,19 +516,66 @@ fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
         }
         "replace_slide" => {
             let a: ReplaceArg = parse(&args)?;
-            let deck = doc(app, &a.deck)?.update(0, |t| replace_slide(t, a.slide, &a.source))?;
+            let d = doc(app, &a.deck)?;
+            if d.review() {
+                let op = d.propose(Kind::Replace, Some(a.slide), false, a.source, a.note)?;
+                return Ok(proposed(&d, op));
+            }
+            let deck = d.update(0, |t| replace_slide(t, a.slide, &a.source))?;
             Ok(summary(&deck))
         }
         "insert_slide" => {
             let a: InsertArg = parse(&args)?;
-            let deck = doc(app, &a.deck)?
-                .update(0, |t| insert_slide(t, a.after, &a.source, a.vertical))?;
+            let d = doc(app, &a.deck)?;
+            if d.review() {
+                let op = d.propose(Kind::Insert, Some(a.after), a.vertical, a.source, a.note)?;
+                return Ok(proposed(&d, op));
+            }
+            let deck = d.update(0, |t| insert_slide(t, a.after, &a.source, a.vertical))?;
             Ok(summary(&deck))
         }
         "delete_slide" => {
             let a: SlideArg = parse(&args)?;
-            let deck = doc(app, &a.deck)?.update(0, |t| delete_slide(t, a.slide))?;
+            let d = doc(app, &a.deck)?;
+            if d.review() {
+                let op = d.propose(Kind::Delete, Some(a.slide), false, String::new(), a.note)?;
+                return Ok(proposed(&d, op));
+            }
+            let deck = d.update(0, |t| delete_slide(t, a.slide))?;
             Ok(summary(&deck))
+        }
+        "get_proposal" => {
+            let a: DeckArg = parse(&args)?;
+            Ok(doc(app, &a.deck)?.state_view())
+        }
+        "await_review" => {
+            let a: DeckArg = parse(&args)?;
+            let secs = args
+                .get("timeout")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120)
+                .clamp(1, 600);
+            Ok(doc(app, &a.deck)?
+                .await_review(std::time::Duration::from_secs(secs))
+                .await)
+        }
+        "withdraw_proposal" => {
+            let a: DeckArg = parse(&args)?;
+            let d = doc(app, &a.deck)?;
+            let ids: Vec<u32> = match args.get("op").and_then(|v| v.as_u64()) {
+                Some(id) => vec![id as u32],
+                None => d.state_view()["ops"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|o| o["status"] == "pending")
+                    .filter_map(|o| o["id"].as_u64().map(|i| i as u32))
+                    .collect(),
+            };
+            for id in &ids {
+                d.resolve(*id, crate::review::Action::Withdraw)?;
+            }
+            Ok(json!({ "withdrawn": ids }))
         }
         "list_themes" => {
             let themes = theme::list(&app.root).map_err(|e| format!("{e:#}"))?;
@@ -534,7 +629,7 @@ fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
 // separators stay where `deck::split` put them, so a round trip through
 // get_slide → replace_slide with the same source leaves the file unchanged.
 
-fn replace_slide(text: &str, slide: usize, source: &str) -> Result<String, String> {
+pub(crate) fn replace_slide(text: &str, slide: usize, source: &str) -> Result<String, String> {
     let (all, i) = region(text, slide)?;
     let r = &all[i];
     let prefix = if r.start == 0 { "" } else { "\n" };
@@ -547,7 +642,12 @@ fn replace_slide(text: &str, slide: usize, source: &str) -> Result<String, Strin
     ))
 }
 
-fn insert_slide(text: &str, after: usize, source: &str, vertical: bool) -> Result<String, String> {
+pub(crate) fn insert_slide(
+    text: &str,
+    after: usize,
+    source: &str,
+    vertical: bool,
+) -> Result<String, String> {
     let sep = if vertical { "--" } else { "---" };
     let body = source.trim_matches('\n');
     if after == 0 {
@@ -566,7 +666,7 @@ fn insert_slide(text: &str, after: usize, source: &str, vertical: bool) -> Resul
     })
 }
 
-fn delete_slide(text: &str, slide: usize) -> Result<String, String> {
+pub(crate) fn delete_slide(text: &str, slide: usize) -> Result<String, String> {
     let (all, i) = region(text, slide)?;
     if all.len() == 1 {
         return Err("a deck keeps at least one slide; use put_deck to rewrite it".into());

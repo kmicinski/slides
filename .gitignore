@@ -4,3 +4,4 @@
 /decks/*
 !/decks/.gitkeep
 .DS_Store
+/agent-home

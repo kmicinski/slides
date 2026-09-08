@@ -6,6 +6,7 @@
 
 import type { ClientMsg, Diagnostic, ServerMsg } from "./protocol.js";
 import { socketUrl } from "./protocol.js";
+import * as review from "./review.js";
 
 const MONACO = "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs";
 const EMACS = "https://cdn.jsdelivr.net/npm/monaco-emacs@0.3.0/dist/monaco-emacs";
@@ -27,12 +28,19 @@ function fnv1a(s: string): number {
 
 let cols: number[][] = []; // first source line of every slide, by column and row
 let shown = "";
+let previewProposed = false; // the preview shows the proposed deck: its slides are not ours to follow
 
-function follow(line: number) {
+function slideAt(line: number): { h: number; v: number } {
   let h = 0;
   while (h + 1 < cols.length && cols[h + 1][0] <= line) h++;
   let v = 0;
   while (v + 1 < (cols[h]?.length ?? 0) && cols[h][v + 1] <= line) v++;
+  return { h, v };
+}
+
+function follow(line: number) {
+  if (previewProposed) return;
+  const { h, v } = slideAt(line);
   const key = `${h},${v}`;
   if (key !== shown) {
     shown = key;
@@ -113,6 +121,38 @@ function connect(editor: monaco.editor.IStandaloneCodeEditor) {
       return { severity: monaco.MarkerSeverity.Error, message: d.message, startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: model.getLineMaxColumn(line) };
     }));
 
+  const panel = review.init({
+    deck: document.body.dataset.deck ?? "",
+    gotoLine(line) {
+      const last = model.getLineCount();
+      const l = Math.min(Math.max(1, line), last);
+      editor.setPosition({ lineNumber: l, column: 1 });
+      editor.revealLineInCenter(l, monaco.editor.ScrollType.Smooth);
+    },
+    showProposed(on, at) {
+      previewProposed = on;
+      document.getElementById("preview-badge")!.hidden = !on;
+      document.getElementById("preview-pane")!.classList.toggle("proposed", on);
+      preview.contentWindow?.postMessage({ type: "view", proposed: on }, location.origin);
+      if (on && at) preview.contentWindow?.postMessage({ type: "goto", h: at.h, v: at.v }, location.origin);
+      if (!on) { shown = ""; follow(editor.getPosition()?.lineNumber ?? 1); }
+    },
+    cursorSlide() {
+      const line = editor.getPosition()?.lineNumber;
+      if (!line || !cols.length) return null;
+      const { h, v } = slideAt(line);
+      let slide = v + 1;
+      for (let i = 0; i < h; i++) slide += cols[i].length;
+      const from = cols[h][v];
+      let heading = "";
+      for (let l = from; l <= Math.min(from + 6, model.getLineCount()); l++) {
+        const t = model.getLineContent(l).trim();
+        if (t.startsWith("#")) { heading = t.replace(/^#+\s*/, ""); break; }
+      }
+      return { slide, heading };
+    },
+  });
+
   const handle = (m: ServerMsg) => {
     switch (m.type) {
       case "text":
@@ -133,6 +173,12 @@ function connect(editor: monaco.editor.IStandaloneCodeEditor) {
         break;
       case "saved":
         status(m.error ? `save failed: ${m.error}` : "saved");
+        break;
+      case "state":
+        panel.onState(m.state);
+        break;
+      case "agent":
+        panel.onAgent(m.event);
         break;
     }
   };
