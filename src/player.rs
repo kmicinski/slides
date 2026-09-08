@@ -21,6 +21,41 @@ use walkdir::WalkDir;
 const TEMPLATE: &str = include_str!("player.html");
 
 pub fn html(deck: &Deck, name: &str, theme: &Theme, live: bool) -> String {
+    html_with(deck, name, theme, live, &Default::default())
+}
+
+/// One slide as a still: a player with no chrome, for the review panel's
+/// thumbnails and the compare view. Served at `/deck/<name>/thumb` (same
+/// depth as `live`, so the relative engine/theme links hold).
+pub fn thumb(slide: &Slide, name: &str, theme: &Theme) -> String {
+    let deck = Deck {
+        columns: vec![vec![slide.clone()]],
+        ..Default::default()
+    };
+    let mut extra = serde_json::Map::new();
+    for (k, v) in [
+        ("controls", false),
+        ("progress", false),
+        ("keyboard", false),
+        ("touch", false),
+        ("hash", false),
+        ("history", false),
+    ] {
+        extra.insert(k.into(), v.into());
+    }
+    extra.insert("slideNumber".into(), false.into());
+    extra.insert("transition".into(), "none".into());
+    html_with(&deck, name, theme, false, &extra)
+}
+
+/// `extra` overrides the theme's reveal options.
+pub fn html_with(
+    deck: &Deck,
+    name: &str,
+    theme: &Theme,
+    live: bool,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> String {
     let css = theme
         .css
         .iter()
@@ -40,6 +75,9 @@ pub fn html(deck: &Deck, name: &str, theme: &Theme, live: bool) -> String {
         // The preview lives in an iframe: keep it out of the page's URL and history.
         options.insert("hash".into(), false.into());
         options.insert("history".into(), false.into());
+    }
+    for (k, v) in extra {
+        options.insert(k.clone(), v.clone());
     }
     let slides = if live {
         String::new()

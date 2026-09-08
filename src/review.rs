@@ -220,11 +220,58 @@ pub fn proposed_text(text: &str, ops: &[Op]) -> String {
     t
 }
 
+/// Where a pending op's result sits in the proposed deck (1-based), to point
+/// the preview and thumbnails at it. A delete points at the slide that now
+/// occupies its place.
+pub fn proposed_position(op: &Op, text: &str, proposed: &str, stale: bool) -> Option<usize> {
+    if op.status != Status::Pending || stale {
+        return None;
+    }
+    let prop_srcs = sources(proposed);
+    match op.kind {
+        Kind::Replace | Kind::Insert => {
+            let h = fnv1a(op.source.trim_matches('\n'));
+            prop_srcs.iter().position(|s| fnv1a(s) == h).map(|i| i + 1)
+        }
+        Kind::Delete => {
+            let at = locate(text, op.anchor.as_ref()?)?;
+            Some(at.min(prop_srcs.len()).max(1))
+        }
+        Kind::Deck => Some(1),
+    }
+}
+
+/// Stamps the proposed deck's added/changed slides with `data-proposed`, which
+/// the player shows as a badge (see `player.html`).
+pub fn mark_proposed(deck: &mut crate::deck::Deck, text: &str, proposed: &str, ops: &[Op]) {
+    let prop = regions(proposed);
+    for op in ops {
+        let stale = op.status == Status::Pending && apply(text, op, ops).is_err();
+        let Some(pos) = proposed_position(op, text, proposed, stale) else {
+            continue;
+        };
+        let Some(r) = prop.get(pos - 1) else { continue };
+        let label = match op.kind {
+            Kind::Insert => "new",
+            Kind::Replace => "changed",
+            _ => continue,
+        };
+        if let Some(slide) = deck
+            .columns
+            .get_mut(r.column - 1)
+            .and_then(|c| c.get_mut(r.row - 1))
+        {
+            slide.attrs = format!("{} data-proposed=\"{label}\"", slide.attrs)
+                .trim()
+                .to_string();
+        }
+    }
+}
+
 /// What the editor and the agent see: each op with where it lands now.
 pub fn view(text: &str, state: &DeckState, proposed: &str) -> Value {
     let cur = regions(text);
     let prop = regions(proposed);
-    let prop_srcs = sources(proposed);
     let ops: Vec<Value> = state
         .proposal
         .as_ref()
@@ -248,15 +295,7 @@ pub fn view(text: &str, state: &DeckState, proposed: &str) -> Value {
             let current = slide
                 .and_then(|s| cur.get(s - 1))
                 .map(|r| text[r.start..r.end].trim_matches('\n'));
-            // Where the op's result sits in the proposed deck (to point the preview at it).
-            let proposed_slide = match op.kind {
-                Kind::Replace | Kind::Insert if op.status == Status::Pending && !stale => {
-                    let h = fnv1a(op.source.trim_matches('\n'));
-                    prop_srcs.iter().position(|s| fnv1a(s) == h).map(|i| i + 1)
-                }
-                Kind::Delete => slide.map(|s| s.saturating_sub(1).max(1)),
-                _ => None,
-            };
+            let proposed_slide = proposed_position(op, text, proposed, stale);
             let (pcol, prow) = proposed_slide
                 .and_then(|s| prop.get(s - 1))
                 .map(|r| (r.column, r.row))
@@ -548,7 +587,9 @@ impl Doc {
         let pending = g.state.review && g.ops().iter().any(|o| o.status == Status::Pending);
         g.proposed = pending.then(|| {
             let text = proposed_text(&g.text, g.ops());
-            Arc::new(Renderer::default().render(&text))
+            let mut deck = Renderer::default().render(&text);
+            mark_proposed(&mut deck, &g.text, &text, g.ops());
+            Arc::new(deck)
         });
     }
 }

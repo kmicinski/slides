@@ -172,10 +172,18 @@ edits* switch in the editor header (on by default; `src/review.rs`):
   **and** a hash of that slide's source, so edits elsewhere in the deck leave it
   valid, while editing the targeted slide makes it *stale* (reject or
   re-propose; never merged).
-- The editor's **Review** tab lists the operations with the tool's `note`, a
-  line diff, and accept / reject / comment. Clicking one jumps the editor to the
-  slide and switches the preview to the **proposed deck** (current text with
-  every pending op applied); a dashed outline and a badge mark that state.
+- A proposal is reviewed as a **fork of the deck**, not as text. The editor's
+  **Review** tab lists the operations as cards with the tool's `note` and a
+  rendered thumbnail of the proposed slide (`/deck/<name>/thumb`, a
+  chrome-less one-slide player); the line diff is there too, folded away.
+  Selecting a card puts the preview into **compare** mode: the current deck
+  above and the proposed deck below, both parked on that slide, with prev /
+  next / accept / reject / comment in a bar (keys `n` `p` `a` `r` `c`, `esc`
+  to leave). The lower player is the whole forked deck — arrow around it; its
+  added and changed slides carry a dashed outline and a "proposed" badge
+  (`data-proposed` on the section, set only on the live proposed rendering).
+  A deletion shows as a red overlay on the current slide. "Show proposed deck
+  in the preview" browses the fork in the single preview instead.
   Comments are for the agent: `get_proposal` returns them, `await_review`
   blocks until the author acts, `withdraw_proposal` takes an op back.
 - Accepting splices the change through the same code the direct tools use;

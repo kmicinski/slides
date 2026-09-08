@@ -9,6 +9,15 @@
     <link rel="stylesheet" href="../../engine/reveal/dist/reveal.css" />
     <link rel="stylesheet" href="../../engine/katex/katex.min.css" />
     {{THEME_CSS}}
+    <style>
+      /* Slides a pending proposal adds or changes (live preview of the proposed deck only). */
+      .reveal .slides section[data-proposed] { outline: 4px dashed #cb4b16; outline-offset: -4px; }
+      .reveal .slides section[data-proposed]::before {
+        content: "proposed · " attr(data-proposed); position: absolute; top: 10px; right: 14px; z-index: 5;
+        background: #cb4b16; color: #fff; font: 700 15px/1 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+        letter-spacing: .06em; text-transform: uppercase; padding: 6px 10px; border-radius: 4px;
+      }
+    </style>
   </head>
   <body>
     <div class="reveal">

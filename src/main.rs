@@ -105,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
     let gate = || middleware::from_fn_with_state(app.clone(), auth::gate);
     let decks = Router::new()
         .route("/{name}/live", get(pages::live))
+        .route("/{name}/thumb", get(pages::thumb))
         .route("/{name}/ws", get(pages::ws))
         .route_layer(gate())
         .route("/{name}/export.zip", get(pages::export))

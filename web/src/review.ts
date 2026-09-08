@@ -2,6 +2,12 @@
 // "Review" (accept / reject / comment on proposed slide changes). State comes
 // over the editor's socket (`state` and `agent` messages); actions go over
 // plain fetches to /api/decks/<name>/… (src/api.rs).
+//
+// A proposal is reviewed as a fork of the deck, not as text: each op card
+// carries a rendered thumbnail of the proposed slide, and selecting one puts
+// the preview into *compare* mode — the current deck above, the proposed deck
+// below, both parked on that slide — with prev/next to step through the
+// proposal. The text diff is there too, folded away.
 
 import type { AgentEvent, AgentMsg, OpView, StateView } from "./protocol.js";
 
@@ -9,8 +15,10 @@ export interface Host {
   deck: string;
   /** Move the editor cursor to a source line. */
   gotoLine(line: number): void;
-  /** Show the proposed or the real deck in the preview, optionally at a slide. */
+  /** Show the proposed or the real deck in the (single) preview, optionally at a slide. */
   showProposed(on: boolean, at?: { h: number; v: number }): void;
+  /** Split the preview into current/proposed players parked on `op`; `null` restores the single preview. */
+  compare(op: OpView | null): void;
   /** 1-based position of the slide under the cursor, and its heading, if known. */
   cursorSlide(): { slide: number; heading: string } | null;
 }
@@ -22,6 +30,13 @@ async function post(url: string, body: unknown = {}): Promise<Response> {
   const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!r.ok) throw new Error(await r.text());
   return r;
+}
+
+/** 32-bit FNV-1a, for cache-busting thumbnail URLs when an op's source changes. */
+function fnv(s: string): number {
+  let h = 0x811c9dc5;
+  for (const ch of s) { h ^= ch.codePointAt(0)!; h = Math.imul(h, 0x01000193); }
+  return h >>> 0;
 }
 
 // ---- line diff ----------------------------------------------------------------
@@ -51,6 +66,22 @@ function diffHtml(current: string | null, source: string, kind: OpView["kind"]):
   const a = kind === "insert" ? [] : (current ?? "").split("\n");
   const b = kind === "delete" ? [] : source.split("\n");
   return diffLines(a, b).map((r) => `<div class="d${r.t === " " ? "" : r.t === "-" ? " del" : " add"}">${esc(r.s) || "&nbsp;"}</div>`).join("");
+}
+
+// ---- describing an op ---------------------------------------------------------
+
+function where(op: OpView): string {
+  if (op.kind === "deck") return "whole deck";
+  if (op.kind === "insert") return (op.slide ? `after slide ${op.slide}` : "at the top") + (op.vertical ? " (vertical)" : "");
+  return op.slide ? `slide ${op.slide}` : "slide (moved)";
+}
+
+/** Which slide a thumbnail should show, in which deck; `null` when there is nothing to draw. */
+function thumbOf(op: OpView): { view: "current" | "proposed"; slide: number } | null {
+  if (op.status !== "pending" || op.stale) return null;
+  if (op.kind === "delete") return op.slide ? { view: "current", slide: op.slide } : null;
+  if (op.kind === "deck") return { view: "proposed", slide: 1 };
+  return op.proposed_slide ? { view: "proposed", slide: op.proposed_slide } : null;
 }
 
 // ---- the drawer ---------------------------------------------------------------
@@ -158,67 +189,120 @@ export function init(host: Host) {
   };
   setInterval(updateContext, 800);
 
-  // ---- Review
+  // ---- Review: browse the fork, or compare op by op
   const showBox = $<HTMLInputElement>("show-proposed");
   const setProposed = (on: boolean, at?: { h: number; v: number }) => {
     proposedShown = on;
     showBox.checked = on;
     host.showProposed(on, at);
   };
-  showBox.onchange = () => setProposed(showBox.checked);
+  showBox.onchange = () => { if (showBox.checked) select(null); setProposed(showBox.checked); };
   $("clear-resolved").onclick = () => post(api("proposal/clear")).catch((e) => alert(e.message));
 
   const opsEl = $("ops");
   const act = (op: OpView, action: string, comment = "") =>
     post(api(`proposal/${op.id}/${action}`), { comment }).catch((e) => alert(e.message));
+  const askComment = (op: OpView) => {
+    const c = prompt("Tell the agent what to change about this proposal:", op.comment);
+    if (c !== null) void act(op, "comment", c);
+  };
+
+  let selected: number | null = null; // op id shown in compare mode
+  const pendingOps = () => state?.ops.filter((o) => o.status === "pending" && !o.stale) ?? [];
+  const current = () => state?.ops.find((o) => o.id === selected) ?? null;
+
+  const bar = $("compare-bar");
+  const syncCompare = () => {
+    const op = current();
+    if (!op || op.status !== "pending" || op.stale) {
+      selected = null;
+      host.compare(null);
+      for (const c of opsEl.children) c.classList.remove("selected");
+      return;
+    }
+    if (proposedShown) setProposed(false);
+    host.compare(op);
+    const ps = pendingOps();
+    $("cmp-pos").textContent = `${ps.findIndex((o) => o.id === op.id) + 1} / ${ps.length}`;
+    $("cmp-title").textContent = `${op.kind} · ${where(op)}${op.note ? " — " + op.note : ""}`;
+    $("label-current").textContent = op.kind === "insert" ? `current · slide ${op.slide ?? "—"} (new slide goes after this)` : `current · slide ${op.slide ?? "—"}`;
+    $("label-proposed").textContent = op.kind === "delete" ? `proposed · slide ${op.proposed_slide ?? "—"} (what follows)` : `proposed · slide ${op.proposed_slide ?? "—"}`;
+    for (const c of opsEl.children) c.classList.toggle("selected", (c as HTMLElement).dataset.op === String(op.id));
+    if (op.line) host.gotoLine(op.line);
+  };
+  const select = (op: OpView | null) => { selected = op?.id ?? null; syncCompare(); };
+  const step = (d: 1 | -1) => {
+    const ps = pendingOps();
+    if (!ps.length) return select(null);
+    const i = ps.findIndex((o) => o.id === selected);
+    select(ps[i < 0 ? (d > 0 ? 0 : ps.length - 1) : (i + d + ps.length) % ps.length]);
+  };
+  $("cmp-prev").onclick = () => step(-1);
+  $("cmp-next").onclick = () => step(1);
+  $("cmp-close").onclick = () => select(null);
+  $("cmp-accept").onclick = () => { const op = current(); if (op) void act(op, "accept"); };
+  $("cmp-reject").onclick = () => { const op = current(); if (op) void act(op, "reject"); };
+  $("cmp-comment").onclick = () => { const op = current(); if (op) askComment(op); };
+  document.addEventListener("keydown", (e) => {
+    if (selected === null || bar.hidden) return;
+    if ((e.target as HTMLElement | null)?.closest("input, textarea, select, .monaco-editor")) return;
+    const op = current();
+    switch (e.key) {
+      case "n": case "]": step(1); break;
+      case "p": case "[": step(-1); break;
+      case "a": if (op) void act(op, "accept"); break;
+      case "r": if (op) void act(op, "reject"); break;
+      case "c": if (op) askComment(op); break;
+      case "Escape": select(null); break;
+      default: return;
+    }
+    e.preventDefault();
+  });
 
   const card = (op: OpView): HTMLElement => {
     const el = document.createElement("div");
     el.className = `op ${op.status}${op.stale ? " stale" : ""}`;
-    const where = op.kind === "deck" ? "whole deck"
-      : op.kind === "insert" ? (op.slide ? `after slide ${op.slide}` : "at the top") + (op.vertical ? " (vertical)" : "")
-      : op.slide ? `slide ${op.slide}` : "slide (moved)";
+    el.dataset.op = String(op.id);
     const pill = op.stale ? "stale" : op.status;
+    const t = thumbOf(op);
     el.innerHTML = `
-      <div class="op-head"><span class="kind ${op.kind}">${op.kind}</span> <span class="where">${esc(where)}</span> <span class="pill ${pill}">${pill}</span></div>
+      <div class="op-head"><span class="kind ${op.kind}">${op.kind}</span> <span class="where">${esc(where(op))}</span> <span class="pill ${pill}">${pill}</span></div>
+      ${t ? `<div class="thumb${op.kind === "delete" ? " del" : ""}"><iframe tabindex="-1" loading="lazy" src="/deck/${host.deck}/thumb?view=${t.view}&slide=${t.slide}&v=${fnv(op.source)}"></iframe></div>` : ""}
       ${op.note ? `<div class="note">${esc(op.note)}</div>` : ""}
-      <div class="diff"></div>
       ${op.comment ? `<div class="comment">💬 ${esc(op.comment)}</div>` : ""}
+      <details><summary>text diff</summary><div class="diff"></div></details>
       <div class="row actions"></div>`;
     el.querySelector<HTMLElement>(".diff")!.innerHTML = op.kind === "deck"
       ? `<div class="d">${esc(op.source.slice(0, 2000))}${op.source.length > 2000 ? "…" : ""}</div>`
       : diffHtml(op.current, op.source, op.kind);
     const actions = el.querySelector<HTMLElement>(".actions")!;
+    const button = (label: string, cls: string, fn: () => void) => {
+      const b = document.createElement("button");
+      b.textContent = label; b.className = cls;
+      b.onclick = (e) => { e.stopPropagation(); fn(); };
+      actions.append(b);
+    };
     if (op.status === "pending") {
-      if (!op.stale) {
-        const accept = document.createElement("button"); accept.textContent = "accept"; accept.className = "accept";
-        accept.onclick = (e) => { e.stopPropagation(); void act(op, "accept"); };
-        actions.append(accept);
-      }
-      const reject = document.createElement("button"); reject.textContent = "reject";
-      reject.onclick = (e) => { e.stopPropagation(); void act(op, "reject"); };
-      const comment = document.createElement("button"); comment.textContent = op.comment ? "edit comment" : "comment";
-      comment.onclick = (e) => {
-        e.stopPropagation();
-        const c = prompt("Tell the agent what to change about this proposal:", op.comment);
-        if (c !== null) void act(op, "comment", c);
-      };
-      actions.append(reject, comment);
+      if (!op.stale) button("accept", "accept", () => void act(op, "accept"));
+      button("reject", "", () => void act(op, "reject"));
+      button(op.comment ? "edit comment" : "comment", "", () => askComment(op));
       if (op.stale) {
         const why = document.createElement("span"); why.className = "why"; why.textContent = "the slide changed since this was proposed";
         actions.append(why);
       }
     } else {
-      const drop = document.createElement("button"); drop.textContent = "dismiss";
-      drop.onclick = (e) => { e.stopPropagation(); void act(op, "withdraw"); };
-      actions.append(drop);
+      button("dismiss", "", () => void act(op, "withdraw"));
     }
-    el.onclick = () => {
-      for (const o of opsEl.children) o.classList.toggle("selected", o === el);
-      if (op.line) host.gotoLine(op.line);
-      if (op.status === "pending" && !op.stale && op.proposed_col) setProposed(true, { h: op.proposed_col - 1, v: op.proposed_row - 1 });
-    };
+    el.onclick = () => { if (op.status === "pending" && !op.stale) select(op); else if (op.line) host.gotoLine(op.line); };
     return el;
+  };
+
+  /** Thumbnails are full-size players scaled to the card; size them once laid out. */
+  const fitThumbs = () => {
+    for (const th of opsEl.querySelectorAll<HTMLElement>(".thumb")) {
+      const f = th.querySelector<HTMLIFrameElement>("iframe");
+      if (f && th.clientWidth) f.style.transform = `scale(${th.clientWidth / 1280})`;
+    }
   };
 
   const render = () => {
@@ -228,7 +312,11 @@ export function init(host: Host) {
     for (const id of ["pcount", "pcount2"]) { const el = $(id); el.textContent = n ? String(n) : ""; el.hidden = !n; }
     opsEl.replaceChildren(...state.ops.map(card));
     if (!state.ops.length) opsEl.innerHTML = `<p class="empty">No proposals. ${state.review ? "Tool edits (MCP, the agent) will appear here for review." : "Review mode is off: tool edits apply directly."}</p>`;
+    requestAnimationFrame(fitThumbs);
     if (!n && proposedShown) setProposed(false);
+    // The selected op may have been resolved: move on to the next pending one.
+    if (selected !== null && !current()?.stale && current()?.status === "pending") syncCompare();
+    else if (selected !== null) { selected = null; if (pendingOps().length) step(1); else syncCompare(); }
   };
 
   return {
@@ -237,7 +325,7 @@ export function init(host: Host) {
       state = s;
       render();
       if (first || !running) renderTranscript(s.agent.messages);
-      if (first && s.pending) show("review");
+      if (first && s.pending) { show("review"); step(1); }
     },
     onAgent(ev: AgentEvent) {
       switch (ev.kind) {
@@ -248,7 +336,6 @@ export function init(host: Host) {
           break;
         case "phase": phase = ev.text ?? "working…"; liveText(); break;
         case "delta":
-          // Stream the reply as it is written; the final "text" event replaces it.
           if (!draft) { draft = bubble("assistant draft", ""); if (live) transcript.append(live); }
           draft.textContent += ev.text ?? "";
           break;
@@ -259,7 +346,10 @@ export function init(host: Host) {
           break;
         case "tool": bubble("tool", ev.text ?? ""); if (live) transcript.append(live); break;
         case "error": bubble("error", ev.text ?? ""); break;
-        case "done": setRunning(false); if (state?.pending) show("review"); break;
+        case "done":
+          setRunning(false);
+          if (state?.pending) { show("review"); if (selected === null) step(1); }
+          break;
       }
       transcript.scrollTop = transcript.scrollHeight;
     },

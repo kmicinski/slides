@@ -97,7 +97,18 @@ pub async fn editor(
 <a href="/deck/{name}/" target="_blank">player</a><a href="/deck/{name}/live" target="_blank">live view</a><a href="/deck/{name}/export.zip">export</a></header>
 <main>
 <div id="editor"></div><div id="divider"></div>
-<div id="preview-pane"><iframe id="preview" src="/deck/{name}/live"></iframe><div id="preview-badge" hidden>proposed</div></div>
+<div id="preview-pane">
+  <div id="compare-bar" hidden title="keys: n / p next and previous · a accept · r reject · c comment · esc close">
+    <button id="cmp-prev" title="previous (p)">◀</button><span id="cmp-pos" class="pos"></span><button id="cmp-next" title="next (n)">▶</button>
+    <span id="cmp-title" class="title"></span><span class="spacer"></span>
+    <button id="cmp-accept" class="accept" title="accept (a)">accept</button><button id="cmp-reject" title="reject (r)">reject</button><button id="cmp-comment" title="comment (c)">comment</button><button id="cmp-close" title="back to the single preview (esc)">×</button>
+  </div>
+  <div id="panes">
+    <div class="pane" id="pane-current"><div class="pane-label" id="label-current" hidden>current</div><iframe id="preview" src="/deck/{name}/live"></iframe><div id="delete-overlay" hidden>removed in this proposal</div></div>
+    <div class="pane" id="pane-proposed" hidden><div class="pane-label" id="label-proposed">proposed</div><iframe id="preview2" src="/deck/{name}/live"></iframe></div>
+  </div>
+  <div id="preview-badge" hidden>proposed</div>
+</div>
 <aside id="drawer" hidden>
   <nav><button data-tab="ask" class="active">✦ Ask</button><button data-tab="review">Review <span id="pcount" class="count" hidden></span></button><span class="spacer"></span><button id="drawer-close" title="close">×</button></nav>
   <section id="tab-ask">
@@ -133,6 +144,41 @@ pub async fn live(
     let theme = Theme::resolve(&app.root, deck.theme.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
     Ok(Html(player::html(&deck, &name, &theme, true)))
+}
+
+#[derive(Deserialize)]
+pub struct ThumbQuery {
+    #[serde(default)]
+    view: String,
+    slide: usize,
+}
+
+/// One slide, current or proposed deck, as a chrome-less player (`player::thumb`).
+pub async fn thumb(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ThumbQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let doc = app
+        .doc(&name)
+        .ok_or((StatusCode::NOT_FOUND, "no such deck".into()))?;
+    let deck = match q.view.as_str() {
+        "proposed" => doc.proposed().unwrap_or_else(|| doc.deck()),
+        _ => doc.deck(),
+    };
+    let slide = deck
+        .columns
+        .iter()
+        .flatten()
+        .nth(q.slide.wrapping_sub(1))
+        .ok_or((StatusCode::NOT_FOUND, "no such slide".into()))?;
+    let theme = Theme::resolve(&app.root, deck.theme.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Html(player::thumb(slide, &name, &theme)),
+    )
+        .into_response())
 }
 
 pub async fn export(

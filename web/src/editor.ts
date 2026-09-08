@@ -29,6 +29,7 @@ function fnv1a(s: string): number {
 let cols: number[][] = []; // first source line of every slide, by column and row
 let shown = "";
 let previewProposed = false; // the preview shows the proposed deck: its slides are not ours to follow
+let comparing = false; // compare mode: both players are parked on a proposed op
 
 function slideAt(line: number): { h: number; v: number } {
   let h = 0;
@@ -39,7 +40,7 @@ function slideAt(line: number): { h: number; v: number } {
 }
 
 function follow(line: number) {
-  if (previewProposed) return;
+  if (previewProposed || comparing) return;
   const { h, v } = slideAt(line);
   const key = `${h},${v}`;
   if (key !== shown) {
@@ -136,6 +137,35 @@ function connect(editor: monaco.editor.IStandaloneCodeEditor) {
       preview.contentWindow?.postMessage({ type: "view", proposed: on }, location.origin);
       if (on && at) preview.contentWindow?.postMessage({ type: "goto", h: at.h, v: at.v }, location.origin);
       if (!on) { shown = ""; follow(editor.getPosition()?.lineNumber ?? 1); }
+    },
+    compare(op) {
+      const pane = document.getElementById("preview-pane")!;
+      const bar = document.getElementById("compare-bar")!;
+      const pane2 = document.getElementById("pane-proposed")!;
+      const overlay = document.getElementById("delete-overlay")!;
+      const label1 = document.getElementById("label-current")!;
+      const p2 = document.getElementById("preview2") as HTMLIFrameElement;
+      comparing = !!op;
+      pane.classList.toggle("compare", comparing);
+      bar.hidden = pane2.hidden = label1.hidden = !comparing;
+      if (!op) {
+        overlay.hidden = true;
+        if (!previewProposed) { shown = ""; follow(editor.getPosition()?.lineNumber ?? 1); }
+        return;
+      }
+      // Top: the real deck at the slide the op touches (for an insert, the one it follows).
+      preview.contentWindow?.postMessage({ type: "view", proposed: false }, location.origin);
+      if (op.line) {
+        const { h, v } = slideAt(op.line);
+        shown = `${h},${v}`;
+        preview.contentWindow?.postMessage({ type: "goto", h, v }, location.origin);
+      } else if (op.kind === "deck" || !op.slide) {
+        preview.contentWindow?.postMessage({ type: "goto", h: 0, v: 0 }, location.origin);
+      }
+      overlay.hidden = op.kind !== "delete";
+      // Bottom: the forked deck at where the op's result landed.
+      p2.contentWindow?.postMessage({ type: "view", proposed: true }, location.origin);
+      if (op.proposed_col) p2.contentWindow?.postMessage({ type: "goto", h: op.proposed_col - 1, v: op.proposed_row - 1 }, location.origin);
     },
     cursorSlide() {
       const line = editor.getPosition()?.lineNumber;
