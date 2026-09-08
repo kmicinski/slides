@@ -128,11 +128,10 @@ impl Renderer {
                 continue;
             }
             if let Some((at, html)) = raw.take() {
-                events.push(Event::Html(
-                    self.math_in_html(&html, line_of(at), &hoisted, diags)
-                        .into(),
-                ));
+                let html = self.math_in_html(&html, line_of(at), &hoisted, diags);
+                events.push(Event::Html(stamp(&html, line_of(at)).into()));
             }
+            let line = || line_of(range.start);
             events.push(match ev {
                 Event::InlineMath(tex) => Event::Html(self.math(&tex, false, line_of(range.start), &hoisted, diags).into()),
                 Event::DisplayMath(tex) => Event::Html(self.math(&tex, true, line_of(range.start), &hoisted, diags).into()),
@@ -143,10 +142,18 @@ impl Renderer {
                         CodeBlockKind::Indented => "",
                     };
                     Event::Html(match lang {
-                        "" => "<pre><code>".into(),
-                        lang => format!("<pre><code class=\"{}\">", escape(lang)).into(),
+                        "" => format!("<pre data-line=\"{}\"><code>", line()).into(),
+                        lang => format!("<pre data-line=\"{}\"><code class=\"{}\">", line(), escape(lang)).into(),
                     })
                 }
+                // Block starts carry their source line so the editor can jump to
+                // what was clicked in the preview (the heading-attributes
+                // extension is off, so headings have no id/class to preserve).
+                Event::Start(Tag::Paragraph) => Event::Html(format!("<p data-line=\"{}\">", line()).into()),
+                Event::Start(Tag::Heading { level, .. }) => Event::Html(format!("<{level} data-line=\"{}\">", line()).into()),
+                Event::Start(Tag::Item) => Event::Html(format!("<li data-line=\"{}\">", line()).into()),
+                Event::Start(Tag::BlockQuote(_)) => Event::Html(format!("<blockquote data-line=\"{}\">", line()).into()),
+                Event::Start(Tag::Table(_)) => Event::Html(format!("<table data-line=\"{}\">", line()).into()),
                 Event::End(TagEnd::CodeBlock) => {
                     in_code = false;
                     Event::Html("</code></pre>\n".into())
@@ -161,10 +168,8 @@ impl Renderer {
             });
         }
         if let Some((at, html)) = raw.take() {
-            events.push(Event::Html(
-                self.math_in_html(&html, line_of(at), &hoisted, diags)
-                    .into(),
-            ));
+            let html = self.math_in_html(&html, line_of(at), &hoisted, diags);
+            events.push(Event::Html(stamp(&html, line_of(at)).into()));
         }
         let mut out = String::with_capacity(md.len() * 2);
         pulldown_cmark::html::push_html(&mut out, events.into_iter());
@@ -275,7 +280,10 @@ fn katex_message(e: &katex::Error) -> String {
 }
 
 /// Splits the source into columns of `(first line, markdown)` slides.
-fn split(src: &str) -> Vec<Vec<(usize, &str)>> {
+/// Slides as `(first line, source)` per column. The source of every slide but
+/// the first begins with the blank line after its separator; each ends just
+/// before the next separator line.
+pub fn split(src: &str) -> Vec<Vec<(usize, &str)>> {
     let lines: Vec<(usize, &str)> = {
         let mut off = 0;
         src.split('\n')
@@ -397,6 +405,20 @@ fn comments(src: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// Adds `data-line` to the first opening tag of a raw HTML block (a callout,
+/// a column layout), so clicks inside it map to where the block starts.
+fn stamp(html: &str, line: usize) -> String {
+    static OPEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*<[a-zA-Z][\w-]*").unwrap());
+    match OPEN.find(html) {
+        Some(m) => format!(
+            "{} data-line=\"{line}\"{}",
+            &html[..m.end()],
+            &html[m.end()..]
+        ),
+        None => html.to_string(),
+    }
+}
+
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -442,6 +464,34 @@ mod tests {
     }
 
     #[test]
+    fn blocks_carry_source_lines() {
+        let deck = Renderer::default().render(
+            "# H\n\npara\n\n- one\n- two\n\n---\n\n<div class=\"callout\">\n\ninside\n\n</div>\n\n```\nx\n```\n",
+        );
+        let a = &deck.columns[0][0].html;
+        for tag in [
+            "<h1 data-line=\"1\">",
+            "<p data-line=\"3\">",
+            "<li data-line=\"5\">",
+            "<li data-line=\"6\">",
+        ] {
+            assert!(a.contains(tag), "{tag} in {a}");
+        }
+        let b = &deck.columns[1][0].html;
+        for tag in [
+            "<div data-line=\"10\" class=\"callout\">",
+            "<p data-line=\"12\">",
+            "<pre data-line=\"16\">",
+        ] {
+            assert!(b.contains(tag), "{tag} in {b}");
+        }
+        assert!(
+            !b.contains("</div data-line"),
+            "closing tags are left alone"
+        );
+    }
+
+    #[test]
     fn slide_parts() {
         let mut r = Renderer::default();
         let deck = r.render("<!-- title: T -->\n<!-- theme: x -->\n<!-- .slide: class=\"big\" -->\n# Hi\nNote:\nremember *this*\n\n---\n\n```python\nx = 1\n```\n\n```\nplain\n```\n");
@@ -451,14 +501,17 @@ mod tests {
         );
         let s = &deck.columns[0][0];
         assert_eq!(s.attrs, "class=\"big\"");
-        assert!(s.html.contains("<h1>Hi</h1>"));
+        assert!(s.html.contains("<h1 data-line=\"4\">Hi</h1>"));
         assert!(s.notes.contains("<em>this</em>"));
         let code = &deck.columns[1][0].html;
         assert!(
-            code.contains("<pre><code class=\"python\">x = 1\n</code></pre>"),
+            code.contains("<pre data-line=\"10\"><code class=\"python\">x = 1\n</code></pre>"),
             "{code}"
         );
-        assert!(code.contains("<pre><code>plain\n</code></pre>"), "{code}");
+        assert!(
+            code.contains("<pre data-line=\"14\"><code>plain\n</code></pre>"),
+            "{code}"
+        );
     }
 
     #[test]
@@ -484,9 +537,14 @@ mod tests {
         let deck = r.render(src);
         let html = &deck.columns[0][0].html;
         assert_eq!(html.matches("katex-display").count(), 3, "{html}");
-        assert!(!html.contains("<h1>") && !html.contains("<li>+"), "{html}");
+        assert!(!html.contains("<h1"), "{html}");
+        assert_eq!(
+            html.matches("<li ").count(),
+            1,
+            "continuation lines are not list items: {html}"
+        );
         assert!(
-            html.contains("<pre><code>$$\nnot math\n$$\n</code></pre>"),
+            html.contains("<pre data-line=\"12\"><code>$$\nnot math\n$$\n</code></pre>"),
             "{html}"
         );
         assert_eq!(

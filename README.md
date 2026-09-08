@@ -130,6 +130,36 @@ read the diagnostics, look at the preview. Players are public at
 (deck + engine + theme) — open `slides/decks/<name>/index.html` from it, and
 print to PDF with `?print-pdf` in Chrome, as with any reveal deck.
 
+## MCP endpoint
+
+`POST /mcp` is a JSON-RPC 2.0 [MCP](https://modelcontextprotocol.io) server —
+the same API for a Claude Code session on another machine. It is gated by
+`Authorization: Bearer $SLIDES_MCP_TOKEN` alone (unset ⇒ the route answers
+503), so a proxy that logs users in for everything else should pass `/mcp`
+through untouched. Tools (`src/mcp.rs`):
+
+| Tool | What it does |
+|---|---|
+| `list_decks` | every deck: title, theme, slide and diagnostic counts |
+| `get_deck` / `put_deck` | whole `deck.md` in and out (`put_deck` creates a deck too) |
+| `check_deck` | render a draft without saving: slide count + diagnostics |
+| `list_slides` | outline: position, column/row, first line, heading, attrs, notes?, diagnostics |
+| `get_slide` | one slide's source (and, on request, its HTML) |
+| `replace_slide` / `insert_slide` / `delete_slide` | edit one slide by position; separators are managed for you |
+| `list_themes` / `get_theme` | themes and their schemas with examples — the vocabulary |
+| `get_schema` / `put_schema` | one schema's CSS + example; write to add a slide design |
+
+Slides are addressed by their 1-based position in presentation order (the
+"n of m" the player shows). Slide edits are spliced into the source under the
+document's lock, so they cannot race an editor's keystrokes; like `PUT
+/api/decks/{name}`, every write re-renders, pushes to open editors and
+previews, and returns the diagnostics. Connect from Claude Code with
+
+```
+claude mcp add --transport http slides https://slides.example.com/mcp \
+  --header "Authorization: Bearer $SLIDES_MCP_TOKEN"
+```
+
 ## Running it for real
 
 ```
@@ -139,7 +169,8 @@ SLIDES_PASSWORD=… docker compose up -d --build
 binds 127.0.0.1:7100; put a reverse proxy with TLS in front. The password
 gates editing and the API; players are public. Sessions live in memory, so a
 restart logs everyone out. Environment: `SLIDES_ROOT` (default `.`),
-`SLIDES_BIND` (default `127.0.0.1:7100`), `SLIDES_PASSWORD` (unset ⇒ read-only).
+`SLIDES_BIND` (default `127.0.0.1:7100`), `SLIDES_PASSWORD` (unset ⇒ read-only),
+`SLIDES_MCP_TOKEN` (unset ⇒ no MCP).
 
 Behind a proxy that does its own login (Authelia, oauth2-proxy, …), set
 `TRUST_PROXY_AUTH=true` instead of a password: any request carrying a

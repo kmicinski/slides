@@ -2,6 +2,8 @@
 // instance alive and patches slide bodies in place as the server sends them
 // (protocol in src/live.rs), so the slide being edited never flickers. It is
 // self-contained — open /deck/<name>/live on a second screen for a live view.
+// Inside the editor's iframe, a click on a slide tells the editor which source
+// line it was (block elements carry `data-line` from the renderer).
 
 import type { Body, PatchSlide, ServerMsg } from "./protocol.js";
 import { socketUrl } from "./protocol.js";
@@ -55,7 +57,10 @@ function apply(cols: PatchSlide[][]) {
   if (structural) rebuild(cols);
   shape = cols.map((c) => c.length);
   const els = slides();
-  cols.forEach((col, h) => col.forEach((s, v) => { if (s.body) fill(els[h][v], s.body); }));
+  cols.forEach((col, h) => col.forEach((s, v) => {
+    els[h][v].dataset.line = String(s.line); // the fallback for clicks on bare slide chrome
+    if (s.body) fill(els[h][v], s.body);
+  }));
   if (structural) {
     // sync() re-reads backgrounds and controls; slide() is what re-derives
     // past/present/future and which sections are vertical stacks.
@@ -78,6 +83,17 @@ function connect() {
 
 window.addEventListener("message", (e) => {
   if (e.origin === location.origin && e.data?.type === "goto") Reveal.slide(e.data.h, e.data.v);
+});
+
+// ---- click → source line ------------------------------------------------------
+
+root.addEventListener("click", (e) => {
+  if (window.parent === window) return; // standalone live view: nothing to tell
+  const target = e.target as Element | null;
+  if (!target || target.closest("a, button, .controls, .progress")) return;
+  if (getSelection()?.toString()) return; // the user was selecting text, not pointing
+  const line = Number(target.closest<HTMLElement>("[data-line]")?.dataset.line);
+  if (line > 0) window.parent.postMessage({ type: "edit", line }, location.origin);
 });
 
 const ready = Reveal.isReady() ? Promise.resolve() : new Promise<void>((r) => Reveal.on("ready", () => r()));

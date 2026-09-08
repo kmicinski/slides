@@ -31,3 +31,6 @@ input, select, button { font: inherit; padding: .3rem .5rem; border: 1px solid #
 button { background: #eee8d5; cursor: pointer; }
 .login { flex-direction: column; align-items: flex-start; }
 .error { color: #dc322f; }
+
+/* The line the preview click landed on, for a moment. */
+.jump-line { background: rgba(181, 137, 0, .22); transition: background .6s; }

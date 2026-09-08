@@ -142,11 +142,23 @@ impl Doc {
 
     /// Replaces the whole text (tools, API).
     pub fn replace(&self, text: String, origin: u64) -> Arc<Deck> {
+        self.update(origin, |_| Ok::<_, std::convert::Infallible>(text))
+            .unwrap_or_else(|e| match e {})
+    }
+
+    /// Rewrites the text under the lock — `f` sees the current text and returns
+    /// the new one — so a tool editing one slide cannot race an editor's delta.
+    pub fn update<E>(
+        &self,
+        origin: u64,
+        f: impl FnOnce(&str) -> Result<String, E>,
+    ) -> Result<Arc<Deck>, E> {
         let mut g = self.0.lock().unwrap();
+        let text = f(&g.text)?;
         let change = Change::Text(text.as_str().into());
         g.text = text;
         self.commit(&mut g, change, origin);
-        g.deck.clone()
+        Ok(g.deck.clone())
     }
 
     fn commit(&self, g: &mut Inner, change: Change, origin: u64) {

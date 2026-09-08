@@ -13,17 +13,19 @@
 //! Environment: `SLIDES_ROOT`, `SLIDES_BIND` (default `127.0.0.1:7100`),
 //! `SLIDES_PASSWORD` (unset ⇒ read-only: players are served, editing refuses),
 //! `TRUST_PROXY_AUTH=true` (the proxy's `Remote-User` header is the login;
-//! see `auth.rs`).
+//! see `auth.rs`), `SLIDES_MCP_TOKEN` (bearer token for the `/mcp` endpoint;
+//! unset ⇒ disabled; see `mcp.rs`).
 
 mod api;
 mod auth;
 mod deck;
 mod live;
+mod mcp;
 mod pages;
 mod player;
 mod theme;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Router, middleware};
 use live::Doc;
 use std::collections::{BTreeMap, HashSet};
@@ -36,6 +38,7 @@ pub struct App {
     pub root: PathBuf,
     pub password: Option<String>,
     pub trust_proxy: bool,
+    pub mcp_token: Option<String>,
     pub sessions: Mutex<HashSet<String>>,
     pub docs: Mutex<BTreeMap<String, Doc>>,
 }
@@ -86,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
         root,
         password: env::var("SLIDES_PASSWORD").ok().filter(|p| !p.is_empty()),
         trust_proxy: env::var("TRUST_PROXY_AUTH").is_ok_and(|v| v == "true" || v == "1"),
+        mcp_token: env::var("SLIDES_MCP_TOKEN").ok().filter(|t| !t.is_empty()),
         sessions: Default::default(),
         docs: Default::default(),
     });
@@ -123,6 +127,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/login", get(auth::login_form).post(auth::login))
         .route("/logout", get(auth::logout))
         .route("/static/{file}", get(pages::static_file))
+        // Outside the gate: mcp.rs checks its own bearer token.
+        .route("/mcp", post(mcp::handler))
         .merge(editing)
         .nest("/deck", decks)
         .nest_service("/engine", ServeDir::new(app.root.join("engine")))
@@ -132,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
     let bind = env::var("SLIDES_BIND").unwrap_or_else(|_| "127.0.0.1:7100".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     eprintln!(
-        "slides: {} deck(s) under {}, {} — http://{bind}/",
+        "slides: {} deck(s) under {}, {}, MCP {} — http://{bind}/",
         app.docs.lock().unwrap().len(),
         app.root.display(),
         if app.trust_proxy {
@@ -141,6 +147,11 @@ async fn main() -> anyhow::Result<()> {
             "editing enabled"
         } else {
             "read-only (set SLIDES_PASSWORD)"
+        },
+        if app.mcp_token.is_some() {
+            "on"
+        } else {
+            "off (set SLIDES_MCP_TOKEN)"
         }
     );
     axum::serve(listener, router).await?;

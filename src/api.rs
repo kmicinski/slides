@@ -94,7 +94,7 @@ pub struct SchemaFiles {
     example: String,
 }
 
-fn schema_paths(
+pub fn schema_paths(
     app: &Shared,
     theme: &str,
     schema: &str,

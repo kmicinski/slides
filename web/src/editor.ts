@@ -2,7 +2,7 @@
 // right. One WebSocket carries edits out and the text, forwarded edits,
 // slide line numbers and diagnostics in (protocol in src/live.rs). The iframe
 // has its own socket for slide bodies; this page only tells it which slide
-// the cursor is on.
+// the cursor is on, and it tells this page which source line was clicked.
 
 import type { ClientMsg, Diagnostic, ServerMsg } from "./protocol.js";
 import { socketUrl } from "./protocol.js";
@@ -155,6 +155,24 @@ function connect(editor: monaco.editor.IStandaloneCodeEditor) {
   });
   editor.onDidChangeCursorPosition((e) => follow(e.position.lineNumber));
   open();
+
+  // ---- preview click → cursor ------------------------------------------------
+  // A slide's own line is the blank line after its separator; land on the
+  // first non-blank line at or after the target so the cursor sits on content.
+  const flash = editor.createDecorationsCollection();
+  let unflash = 0;
+  window.addEventListener("message", (e) => {
+    if (e.origin !== location.origin || e.data?.type !== "edit") return;
+    const last = model.getLineCount();
+    let line = Math.min(Math.max(1, Number(e.data.line) || 1), last);
+    while (line < last && model.getLineContent(line).trim() === "") line++;
+    editor.setPosition({ lineNumber: line, column: model.getLineFirstNonWhitespaceColumn(line) || 1 });
+    editor.revealLineInCenter(line, monaco.editor.ScrollType.Smooth);
+    editor.focus();
+    flash.set([{ range: new monaco.Range(line, 1, line, 1), options: { isWholeLine: true, className: "jump-line" } }]);
+    clearTimeout(unflash);
+    unflash = window.setTimeout(() => flash.clear(), 900);
+  });
 }
 
 // ---- pane divider -------------------------------------------------------------

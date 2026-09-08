@@ -1,0 +1,699 @@
+//! MCP endpoint — JSON-RPC 2.0 over HTTP at `/mcp`, bearer-token gated.
+//!
+//! `SLIDES_MCP_TOKEN` is the whole check (unset ⇒ the route answers 503); the
+//! reverse proxy lets `/mcp` through without its own login so a remote LLM
+//! client can connect. Same skeleton as the notes/recipes/fable servers.
+//!
+//! Tools work at two grains. Whole deck: `deck.md` in, `deck.md` out. Single
+//! slide: slides are addressed by their 1-based position in presentation
+//! order (columns left to right, each column top to bottom — the "n of m"
+//! the player shows), and `replace_slide` / `insert_slide` / `delete_slide`
+//! rewrite just that region of the source, under the document's lock, so a
+//! tool never has to ship a 2,000-line deck to fix one bullet. Every write
+//! goes through the live document like the editor's do: open editors and
+//! previews update at once, the deck is rendered immediately and the render
+//! diagnostics come back in the reply.
+
+use crate::deck::{self, Deck, Diagnostic, Renderer};
+use crate::theme::{self, Theme};
+use crate::{Shared, api};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::fs;
+use subtle::ConstantTimeEq;
+
+const PROTOCOL_VERSION: &str = "2025-06-18";
+const SERVER_NAME: &str = "slides-server";
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Deserialize)]
+struct JsonRpcRequest {
+    #[allow(dead_code)]
+    jsonrpc: Option<String>,
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(serde::Serialize)]
+struct JsonRpcResponse {
+    jsonrpc: &'static str,
+    id: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<JsonRpcError>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonRpcError {
+    code: i64,
+    message: String,
+}
+
+fn ok(id: Value, result: Value) -> Response {
+    axum::Json(JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: Some(result),
+        error: None,
+    })
+    .into_response()
+}
+
+fn err(id: Value, code: i64, message: impl Into<String>) -> Response {
+    axum::Json(JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: None,
+        error: Some(JsonRpcError {
+            code,
+            message: message.into(),
+        }),
+    })
+    .into_response()
+}
+
+fn check_bearer(app: &Shared, headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
+    let Some(token) = &app.mcp_token else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MCP disabled: SLIDES_MCP_TOKEN is not set",
+        ));
+    };
+    let provided = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let same =
+        provided.len() == token.len() && bool::from(provided.as_bytes().ct_eq(token.as_bytes()));
+    if same {
+        Ok(())
+    } else {
+        Err((StatusCode::UNAUTHORIZED, "invalid bearer token"))
+    }
+}
+
+pub async fn handler(State(app): State<Shared>, headers: HeaderMap, body: String) -> Response {
+    if let Err(resp) = check_bearer(&app, &headers) {
+        return resp.into_response();
+    }
+    let req: JsonRpcRequest = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return err(Value::Null, -32700, format!("parse error: {e}")),
+    };
+    // Notifications (no id) — ack and return without a body.
+    let Some(id) = req.id else {
+        return (StatusCode::ACCEPTED, "").into_response();
+    };
+    match req.method.as_str() {
+        "initialize" => ok(
+            id,
+            json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+            }),
+        ),
+        "ping" => ok(id, json!({})),
+        "tools/list" => ok(id, json!({ "tools": tool_catalog() })),
+        "tools/call" => match tools_call(&app, req.params) {
+            Ok(v) => ok(id, tool_text(&v)),
+            Err(msg) => ok(id, tool_error(&msg)),
+        },
+        "resources/list" => ok(id, json!({ "resources": [] })),
+        "prompts/list" => ok(id, json!({ "prompts": [] })),
+        m => err(id, -32601, format!("method not found: {m}")),
+    }
+}
+
+fn tool_text(value: &Value) -> Value {
+    let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| "<unserializable>".into());
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": value,
+        "isError": false
+    })
+}
+
+fn tool_error(msg: &str) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": msg }],
+        "isError": true
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+
+fn tool_catalog() -> Vec<Value> {
+    let deck =
+        json!({ "type": "string", "description": "Deck name (its directory under decks/)." });
+    let slide = json!({
+        "type": "integer",
+        "description": "1-based slide position in presentation order (columns left to right, each column top to bottom), as list_slides reports."
+    });
+    let name = json!({ "type": "string", "description": "Theme name." });
+    let schema =
+        json!({ "type": "string", "description": "Schema name (the CSS class it styles)." });
+    let obj = |props: Value, required: &[&str]| json!({ "type": "object", "properties": props, "required": required });
+    vec![
+        json!({
+            "name": "list_decks",
+            "description": "Every deck with its title, theme, slide count and diagnostic count. Call this first to orient.",
+            "inputSchema": obj(json!({}), &[])
+        }),
+        json!({
+            "name": "get_deck",
+            "description": "The full deck.md source of a deck plus its render summary (title, theme, slide count, diagnostics with line numbers). For one slide use get_slide instead.",
+            "inputSchema": obj(json!({ "deck": deck }), &["deck"])
+        }),
+        json!({
+            "name": "put_deck",
+            "description": "Replace a deck's entire deck.md (creates the deck if it does not exist). Every open editor and preview updates at once. Returns the render diagnostics — read them. Prefer replace_slide for local edits.",
+            "inputSchema": obj(json!({ "deck": deck, "source": { "type": "string", "description": "Complete deck.md text." } }), &["deck", "source"])
+        }),
+        json!({
+            "name": "check_deck",
+            "description": "Render deck.md text without saving anything: title, theme, slide count and diagnostics. Use it to validate a draft before put_deck.",
+            "inputSchema": obj(json!({ "source": { "type": "string" } }), &["source"])
+        }),
+        json!({
+            "name": "list_slides",
+            "description": "Outline of a deck: one entry per slide with its position, column/row, first source line, heading, slide attributes (e.g. class=\"big-point\"), whether it has speaker notes, and its diagnostics.",
+            "inputSchema": obj(json!({ "deck": deck }), &["deck"])
+        }),
+        json!({
+            "name": "get_slide",
+            "description": "The markdown source of one slide (speaker notes included), optionally with its rendered HTML.",
+            "inputSchema": obj(json!({ "deck": deck, "slide": slide, "html": { "type": "boolean", "description": "Also return the rendered HTML and notes (default false)." } }), &["deck", "slide"])
+        }),
+        json!({
+            "name": "replace_slide",
+            "description": "Replace the source of one slide. `source` is the slide's markdown only — no `---`/`--` separators; include `<!-- .slide: … -->` attributes and any `Note:` section as part of it. Returns the deck's diagnostics.",
+            "inputSchema": obj(json!({ "deck": deck, "slide": slide, "source": { "type": "string" } }), &["deck", "slide", "source"])
+        }),
+        json!({
+            "name": "insert_slide",
+            "description": "Insert a new slide after position `after` (0 = before the first slide). `vertical: true` makes it a sub-slide (`--`) of the slide it follows; otherwise it starts a new column (`---`). `source` is the slide's markdown, without separators.",
+            "inputSchema": obj(json!({ "deck": deck, "after": { "type": "integer", "description": "Position of the slide to insert after; 0 inserts at the top." }, "source": { "type": "string" }, "vertical": { "type": "boolean" } }), &["deck", "after", "source"])
+        }),
+        json!({
+            "name": "delete_slide",
+            "description": "Delete one slide (and the separator that followed it). A deck keeps at least one slide.",
+            "inputSchema": obj(json!({ "deck": deck, "slide": slide }), &["deck", "slide"])
+        }),
+        json!({
+            "name": "list_themes",
+            "description": "Installed themes with their reveal.js options, stylesheets and schema names. A schema is a slide design (a CSS class plus an example of the markup it styles); get_theme returns the examples.",
+            "inputSchema": obj(json!({}), &[])
+        }),
+        json!({
+            "name": "get_theme",
+            "description": "One theme in full: reveal options, stylesheets, and every schema with its example markdown — the vocabulary to write slides in that theme.",
+            "inputSchema": obj(json!({ "theme": name }), &["theme"])
+        }),
+        json!({
+            "name": "get_schema",
+            "description": "One schema's CSS and example markdown.",
+            "inputSchema": obj(json!({ "theme": name, "schema": schema }), &["theme", "schema"])
+        }),
+        json!({
+            "name": "put_schema",
+            "description": "Create or overwrite a schema: its CSS (styles for the class) and a self-contained example slide using it. Takes effect for players and previews on the next page load.",
+            "inputSchema": obj(json!({ "theme": name, "schema": schema, "css": { "type": "string" }, "example": { "type": "string" } }), &["theme", "schema", "css", "example"])
+        }),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Slide addressing
+
+/// One slide's region of the source. `start..end` is the byte range `deck::split`
+/// hands the renderer: it begins with the blank line after the separator
+/// (except for the first slide) and ends just before the next separator line
+/// (or at the end of the text).
+struct Region {
+    index: usize,
+    column: usize,
+    row: usize,
+    line: usize,
+    start: usize,
+    end: usize,
+}
+
+fn regions(src: &str) -> Vec<Region> {
+    let base = src.as_ptr() as usize;
+    let mut out = Vec::new();
+    for (c, column) in deck::split(src).into_iter().enumerate() {
+        for (r, (line, md)) in column.into_iter().enumerate() {
+            let start = md.as_ptr() as usize - base;
+            out.push(Region {
+                index: out.len() + 1,
+                column: c + 1,
+                row: r + 1,
+                line,
+                start,
+                end: start + md.len(),
+            });
+        }
+    }
+    out
+}
+
+fn region(src: &str, slide: usize) -> Result<(Vec<Region>, usize), String> {
+    let all = regions(src);
+    if slide == 0 || slide > all.len() {
+        return Err(format!(
+            "no slide {slide}: the deck has {} slide(s)",
+            all.len()
+        ));
+    }
+    Ok((all, slide - 1))
+}
+
+/// The separator line (`---` or `--`) starting at byte `at`, with its newline.
+fn separator(src: &str, at: usize) -> &str {
+    let rest = &src[at..];
+    &rest[..rest.find('\n').map_or(rest.len(), |n| n + 1)]
+}
+
+fn heading(md: &str) -> Option<String> {
+    md.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with('#'))
+        .map(|l| l.trim_start_matches('#').trim().to_string())
+}
+
+fn diagnostics_in(deck: &Deck, first: usize, last: usize) -> Vec<Diagnostic> {
+    deck.diagnostics
+        .iter()
+        .filter(|d| d.line >= first && d.line <= last)
+        .cloned()
+        .collect()
+}
+
+fn summary(deck: &Deck) -> Value {
+    json!({
+        "title": deck.title,
+        "theme": deck.theme,
+        "slides": deck.count(),
+        "diagnostics": deck.diagnostics,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tools
+
+#[derive(Deserialize)]
+struct DeckArg {
+    deck: String,
+}
+#[derive(Deserialize)]
+struct SlideArg {
+    deck: String,
+    slide: usize,
+    #[serde(default)]
+    html: bool,
+}
+#[derive(Deserialize)]
+struct SourceArg {
+    deck: String,
+    source: String,
+}
+#[derive(Deserialize)]
+struct ReplaceArg {
+    deck: String,
+    slide: usize,
+    source: String,
+}
+#[derive(Deserialize)]
+struct InsertArg {
+    deck: String,
+    after: usize,
+    source: String,
+    #[serde(default)]
+    vertical: bool,
+}
+#[derive(Deserialize)]
+struct ThemeArg {
+    theme: String,
+}
+#[derive(Deserialize)]
+struct SchemaArg {
+    theme: String,
+    schema: String,
+}
+#[derive(Deserialize)]
+struct PutSchemaArg {
+    theme: String,
+    schema: String,
+    css: String,
+    example: String,
+}
+
+fn parse<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T, String> {
+    serde_json::from_value(args.clone()).map_err(|e| format!("bad arguments: {e}"))
+}
+
+fn doc(app: &Shared, name: &str) -> Result<crate::live::Doc, String> {
+    app.doc(name).ok_or_else(|| format!("no such deck: {name}"))
+}
+
+fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("missing 'name'")?;
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    match name {
+        "list_decks" => {
+            let docs = app.docs.lock().unwrap();
+            Ok(json!(
+                docs.iter()
+                    .map(|(name, doc)| {
+                        let d = doc.deck();
+                        json!({
+                            "name": name,
+                            "title": d.title,
+                            "theme": d.theme,
+                            "slides": d.count(),
+                            "diagnostics": d.diagnostics.len(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            ))
+        }
+        "get_deck" => {
+            let a: DeckArg = parse(&args)?;
+            let doc = doc(app, &a.deck)?;
+            let mut v = summary(&doc.deck());
+            v["name"] = json!(a.deck);
+            v["source"] = json!(doc.text());
+            Ok(v)
+        }
+        "put_deck" => {
+            let a: SourceArg = parse(&args)?;
+            let deck = match app.doc(&a.deck) {
+                Some(doc) => doc.replace(a.source, 0),
+                None => app
+                    .create(&a.deck, &a.source)
+                    .map_err(|e| format!("{e:#}"))?
+                    .deck(),
+            };
+            let mut v = summary(&deck);
+            v["name"] = json!(a.deck);
+            Ok(v)
+        }
+        "check_deck" => {
+            let src = args
+                .get("source")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'source'")?;
+            Ok(summary(&Renderer::default().render(src)))
+        }
+        "list_slides" => {
+            let a: DeckArg = parse(&args)?;
+            let doc = doc(app, &a.deck)?;
+            let (text, deck) = (doc.text(), doc.deck());
+            let all = regions(&text);
+            let slides: Vec<Value> = all
+                .iter()
+                .map(|r| {
+                    let md = &text[r.start..r.end];
+                    let last = r.line + md.matches('\n').count();
+                    let slide = &deck.columns[r.column - 1][r.row - 1];
+                    json!({
+                        "slide": r.index,
+                        "column": r.column,
+                        "row": r.row,
+                        "line": r.line,
+                        "heading": heading(md),
+                        "attrs": slide.attrs,
+                        "notes": !slide.notes.is_empty(),
+                        "diagnostics": diagnostics_in(&deck, r.line, last),
+                    })
+                })
+                .collect();
+            Ok(json!({ "name": a.deck, "title": deck.title, "slides": slides }))
+        }
+        "get_slide" => {
+            let a: SlideArg = parse(&args)?;
+            let doc = doc(app, &a.deck)?;
+            let (text, deck) = (doc.text(), doc.deck());
+            let (all, i) = region(&text, a.slide)?;
+            let r = &all[i];
+            let md = &text[r.start..r.end];
+            let last = r.line + md.matches('\n').count();
+            let slide = &deck.columns[r.column - 1][r.row - 1];
+            let mut v = json!({
+                "slide": r.index,
+                "column": r.column,
+                "row": r.row,
+                "line": r.line,
+                "source": md.trim_matches('\n'),
+                "diagnostics": diagnostics_in(&deck, r.line, last),
+            });
+            if a.html {
+                v["attrs"] = json!(slide.attrs);
+                v["html"] = json!(slide.html);
+                v["notes"] = json!(slide.notes);
+            }
+            Ok(v)
+        }
+        "replace_slide" => {
+            let a: ReplaceArg = parse(&args)?;
+            let deck = doc(app, &a.deck)?.update(0, |t| replace_slide(t, a.slide, &a.source))?;
+            Ok(summary(&deck))
+        }
+        "insert_slide" => {
+            let a: InsertArg = parse(&args)?;
+            let deck = doc(app, &a.deck)?
+                .update(0, |t| insert_slide(t, a.after, &a.source, a.vertical))?;
+            Ok(summary(&deck))
+        }
+        "delete_slide" => {
+            let a: SlideArg = parse(&args)?;
+            let deck = doc(app, &a.deck)?.update(0, |t| delete_slide(t, a.slide))?;
+            Ok(summary(&deck))
+        }
+        "list_themes" => {
+            let themes = theme::list(&app.root).map_err(|e| format!("{e:#}"))?;
+            Ok(json!(
+                themes
+                    .iter()
+                    .map(|t| json!({
+                        "name": t.name,
+                        "reveal": t.reveal,
+                        "css": t.css,
+                        "schemas": t.schemas.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                    }))
+                    .collect::<Vec<_>>()
+            ))
+        }
+        "get_theme" => {
+            let a: ThemeArg = parse(&args)?;
+            if !crate::valid_name(&a.theme) {
+                return Err("invalid theme name".into());
+            }
+            let t = Theme::load(&app.root.join("themes").join(&a.theme))
+                .map_err(|e| format!("{e:#}"))?;
+            serde_json::to_value(&t).map_err(|e| e.to_string())
+        }
+        "get_schema" => {
+            let a: SchemaArg = parse(&args)?;
+            let (css, md) = api::schema_paths(app, &a.theme, &a.schema).map_err(|(_, m)| m)?;
+            let css = fs::read_to_string(css).map_err(|_| "no such schema".to_string())?;
+            Ok(json!({
+                "theme": a.theme,
+                "schema": a.schema,
+                "css": css,
+                "example": fs::read_to_string(md).unwrap_or_default(),
+            }))
+        }
+        "put_schema" => {
+            let a: PutSchemaArg = parse(&args)?;
+            let (css, md) = api::schema_paths(app, &a.theme, &a.schema).map_err(|(_, m)| m)?;
+            fs::create_dir_all(css.parent().unwrap())
+                .and_then(|()| fs::write(&css, a.css))
+                .and_then(|()| fs::write(&md, a.example))
+                .map_err(|e| e.to_string())?;
+            Ok(json!({ "theme": a.theme, "schema": a.schema, "written": true }))
+        }
+        other => Err(format!("unknown tool: {other}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Source surgery. Each takes the deck text and returns the new text; the
+// separators stay where `deck::split` put them, so a round trip through
+// get_slide → replace_slide with the same source leaves the file unchanged.
+
+fn replace_slide(text: &str, slide: usize, source: &str) -> Result<String, String> {
+    let (all, i) = region(text, slide)?;
+    let r = &all[i];
+    let prefix = if r.start == 0 { "" } else { "\n" };
+    let suffix = if r.end == text.len() { "\n" } else { "\n\n" };
+    Ok(format!(
+        "{}{prefix}{}{suffix}{}",
+        &text[..r.start],
+        source.trim_matches('\n'),
+        &text[r.end..]
+    ))
+}
+
+fn insert_slide(text: &str, after: usize, source: &str, vertical: bool) -> Result<String, String> {
+    let sep = if vertical { "--" } else { "---" };
+    let body = source.trim_matches('\n');
+    if after == 0 {
+        return Ok(format!(
+            "{body}\n\n{sep}\n\n{}",
+            text.trim_start_matches('\n')
+        ));
+    }
+    let (all, i) = region(text, after)?;
+    let r = &all[i];
+    Ok(if r.end == text.len() {
+        format!("{}\n\n{sep}\n\n{body}\n", text.trim_end_matches('\n'))
+    } else {
+        // text[..r.end] ends with the blank line before the next separator.
+        format!("{}{sep}\n\n{body}\n\n{}", &text[..r.end], &text[r.end..])
+    })
+}
+
+fn delete_slide(text: &str, slide: usize) -> Result<String, String> {
+    let (all, i) = region(text, slide)?;
+    if all.len() == 1 {
+        return Err("a deck keeps at least one slide; use put_deck to rewrite it".into());
+    }
+    let r = &all[i];
+    Ok(if r.row > 1 || r.end == text.len() {
+        // A sub-slide goes with the `--` before it (taking the separator after
+        // it would pull the next column under this one); the last slide has
+        // nothing after it to take.
+        let head = &text[..all[i - 1].end];
+        if r.end == text.len() {
+            format!("{}\n", head.trim_end_matches('\n'))
+        } else {
+            format!("{head}{}", &text[r.end..])
+        }
+    } else {
+        // A column top goes with the separator after it, so its sub-slides (if
+        // any) move up to the top of the column.
+        let cut = r.end + separator(text, r.end).len();
+        let rest = &text[cut..];
+        if r.start == 0 {
+            rest.trim_start_matches('\n').to_string()
+        } else {
+            format!("{}{rest}", &text[..r.start])
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DECK: &str =
+        "<!-- title: T -->\n# A\n\n---\n\n# B\n\n--\n\n# B2\n\n---\n\n```\n---\n```\n# C\n";
+
+    fn outline(text: &str) -> Vec<(usize, usize, Option<String>)> {
+        regions(text)
+            .iter()
+            .map(|r| (r.column, r.row, heading(&text[r.start..r.end])))
+            .collect()
+    }
+    fn h(s: &str) -> Option<String> {
+        Some(s.into())
+    }
+
+    #[test]
+    fn positions_follow_presentation_order() {
+        assert_eq!(
+            outline(DECK),
+            vec![
+                (1, 1, h("A")),
+                (2, 1, h("B")),
+                (2, 2, h("B2")),
+                (3, 1, h("C"))
+            ]
+        );
+        assert!(region(DECK, 0).is_err());
+        assert!(region(DECK, 5).is_err());
+    }
+
+    #[test]
+    fn replace_round_trips_and_edits() {
+        for i in 1..=4 {
+            let r = &regions(DECK)[i - 1];
+            let src = DECK[r.start..r.end].trim_matches('\n');
+            assert_eq!(replace_slide(DECK, i, src).unwrap(), DECK, "slide {i}");
+        }
+        let t = replace_slide(DECK, 3, "\n\n# B2 new\n").unwrap();
+        assert_eq!(outline(&t)[2], (2, 2, h("B2 new")));
+        assert_eq!(t, DECK.replace("# B2", "# B2 new"));
+        let t = replace_slide(DECK, 1, "<!-- title: T -->\n# A1").unwrap();
+        assert_eq!(t, DECK.replace("# A", "# A1"));
+        let t = replace_slide(DECK, 4, "# C1").unwrap();
+        assert!(t.ends_with("---\n\n# C1\n"));
+    }
+
+    #[test]
+    fn insert_everywhere() {
+        let t = insert_slide(DECK, 0, "# Z", false).unwrap();
+        assert_eq!(outline(&t)[..2], [(1, 1, h("Z")), (2, 1, h("A"))]);
+        let t = insert_slide(DECK, 1, "# N", true).unwrap();
+        assert_eq!(
+            outline(&t)[..3],
+            [(1, 1, h("A")), (1, 2, h("N")), (2, 1, h("B"))]
+        );
+        let t = insert_slide(DECK, 2, "# N", false).unwrap();
+        assert_eq!(
+            outline(&t),
+            vec![
+                (1, 1, h("A")),
+                (2, 1, h("B")),
+                (3, 1, h("N")),
+                (3, 2, h("B2")),
+                (4, 1, h("C"))
+            ]
+        );
+        let t = insert_slide(DECK, 4, "# N", false).unwrap();
+        assert_eq!(outline(&t)[4], (4, 1, h("N")));
+        assert!(t.ends_with("# C\n\n---\n\n# N\n"));
+        let t = insert_slide(DECK, 4, "# N", true).unwrap();
+        assert_eq!(outline(&t)[4], (3, 2, h("N")));
+    }
+
+    #[test]
+    fn delete_everywhere() {
+        let t = delete_slide(DECK, 1).unwrap();
+        assert_eq!(
+            outline(&t),
+            vec![(1, 1, h("B")), (1, 2, h("B2")), (2, 1, h("C"))]
+        );
+        assert!(t.starts_with("# B\n"));
+        let t = delete_slide(DECK, 2).unwrap();
+        assert_eq!(
+            outline(&t),
+            vec![(1, 1, h("A")), (2, 1, h("B2")), (3, 1, h("C"))]
+        );
+        let t = delete_slide(DECK, 3).unwrap();
+        assert_eq!(
+            outline(&t),
+            vec![(1, 1, h("A")), (2, 1, h("B")), (3, 1, h("C"))]
+        );
+        let t = delete_slide(DECK, 4).unwrap();
+        assert_eq!(
+            outline(&t),
+            vec![(1, 1, h("A")), (2, 1, h("B")), (2, 2, h("B2"))]
+        );
+        assert!(t.ends_with("# B2\n"));
+        assert!(delete_slide("# only\n", 1).is_err());
+    }
+}
