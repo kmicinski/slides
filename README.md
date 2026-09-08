@@ -188,7 +188,19 @@ proposals in the same panel; the cursor's slide is passed as context. One
 conversation per deck, resumed across messages (`--resume`; transcripts under
 `$HOME/.claude`). It needs `SLIDES_MCP_TOKEN`, a `claude` binary on `PATH`
 with OAuth credentials in `$HOME`, and picks its model from
-`SLIDES_AGENT_MODEL` (default `claude-opus-5`). Endpoints in `src/api.rs`.
+`SLIDES_AGENT_MODEL` (default `claude-opus-5`) and its thinking effort from
+`SLIDES_AGENT_EFFORT` (default `medium`; slide edits are routine work and
+higher effort mostly buys minutes of thinking). Both can be overridden per
+message from the Ask form. The run passes `--include-partial-messages` so the
+panel can show what the model is doing (thinking, writing which tool,
+replying) with an elapsed timer, and streams the reply as it is written.
+Endpoints in `src/api.rs`.
+
+Two things that keep agent turns short: consecutive `insert_slide` calls
+after the *same* slide chain in order (so "add three slides after 14" is three
+inserts after 14, no arithmetic on positions that do not exist yet), and
+`list_slides` / `get_deck` report the theme the deck actually renders with,
+so the agent can go straight to `get_theme`.
 
 ## Running it for real
 

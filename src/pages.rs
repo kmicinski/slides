@@ -104,7 +104,10 @@ pub async fn editor(
     <div id="transcript"></div>
     <form id="ask-form">
       <textarea id="ask-input" rows="3" placeholder="What should change? Enter sends, Shift+Enter for a newline."></textarea>
-      <div class="row"><span id="ask-context" class="muted"></span><span class="spacer"></span><button type="button" id="ask-stop" hidden>stop</button><button type="button" id="ask-new" title="start a fresh conversation">new</button><button type="submit" id="ask-send">send</button></div>
+      <div class="row"><span id="ask-context" class="muted"></span><span class="spacer"></span>
+        <select id="ask-model" title="model"><option value="">default model</option><option value="claude-fable-5-1">fable 5.1</option><option value="claude-opus-5">opus 5</option><option value="claude-sonnet-5">sonnet 5</option></select>
+        <select id="ask-effort" title="effort: how long the model thinks"><option value="low">quick</option><option value="medium">normal</option><option value="high">careful</option><option value="xhigh">thorough</option></select>
+        <button type="button" id="ask-stop" hidden>stop</button><button type="button" id="ask-new" title="start a fresh conversation">new</button><button type="submit" id="ask-send">send</button></div>
     </form>
   </section>
   <section id="tab-review" hidden>

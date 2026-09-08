@@ -153,8 +153,38 @@ pub fn locate(text: &str, anchor: &Anchor) -> Option<usize> {
     (0..srcs.len()).find(|&i| at(i)).map(|i| i + 1)
 }
 
+/// Where an insert lands. Several inserts "after slide N" chain in proposal
+/// order — each goes after the previous one's slide, if that slide is in
+/// `text` (pending, in the staged text; accepted, in the real one) — so a tool
+/// can add a run of slides by inserting them all after the same anchor.
+fn insert_after(text: &str, op: &Op, prior: &[Op]) -> Result<usize, String> {
+    let Some(anchor) = &op.anchor else {
+        return Ok(0);
+    };
+    let base = locate(text, anchor).ok_or("the slide it follows was edited")?;
+    let chained = prior
+        .iter()
+        .filter(|o| {
+            o.id != op.id
+                && o.kind == Kind::Insert
+                && o.status != Status::Rejected
+                && o.anchor.map(|a| a.hash) == Some(anchor.hash)
+        })
+        .filter_map(|o| {
+            let h = fnv1a(o.source.trim_matches('\n'));
+            sources(text)
+                .iter()
+                .position(|s| fnv1a(s) == h)
+                .map(|i| i + 1)
+        })
+        .filter(|&pos| pos > base)
+        .max();
+    Ok(chained.unwrap_or(base))
+}
+
 /// Applies one op to `text`. `Err` when its anchor no longer matches (stale).
-pub fn apply(text: &str, op: &Op) -> Result<String, String> {
+/// `prior` is the proposal's op list (for insert chaining, see `insert_after`).
+pub fn apply(text: &str, op: &Op, prior: &[Op]) -> Result<String, String> {
     match op.kind {
         Kind::Deck => {
             let hash = op.anchor.map(|a| a.hash).unwrap_or(0);
@@ -164,10 +194,7 @@ pub fn apply(text: &str, op: &Op) -> Result<String, String> {
             Ok(op.source.clone())
         }
         Kind::Insert => {
-            let after = match &op.anchor {
-                None => 0,
-                Some(a) => locate(text, a).ok_or("the slide it follows was edited")?,
-            };
+            let after = insert_after(text, op, prior)?;
             insert_slide(text, after, &op.source, op.vertical)
         }
         Kind::Replace | Kind::Delete => {
@@ -186,7 +213,7 @@ pub fn apply(text: &str, op: &Op) -> Result<String, String> {
 pub fn proposed_text(text: &str, ops: &[Op]) -> String {
     let mut t = text.to_string();
     for op in ops.iter().filter(|o| o.status == Status::Pending) {
-        if let Ok(next) = apply(&t, op) {
+        if let Ok(next) = apply(&t, op, ops) {
             t = next;
         }
     }
@@ -348,7 +375,7 @@ impl Doc {
             status: Status::Pending,
             comment: String::new(),
         };
-        apply(&staged, &probe).or_else(|_| apply(&g.text, &probe))?;
+        apply(&staged, &probe, g.ops()).or_else(|_| apply(&g.text, &probe, g.ops()))?;
         let all_resolved = g
             .state
             .proposal
@@ -363,10 +390,22 @@ impl Doc {
             });
         }
         let p = g.state.proposal.as_mut().unwrap();
+        // A pending op on the same slide is *replaced* by a new one — except
+        // inserts, which may legitimately stack after the same slide: those
+        // only replace an earlier insert that starts with the same line.
+        let first_line = |src: &str| {
+            src.lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let new_head = first_line(&source);
         let same = |o: &Op| {
             o.status == Status::Pending
                 && o.kind == kind
                 && o.anchor.map(|a| a.hash) == anchor.map(|a| a.hash)
+                && (kind != Kind::Insert || first_line(&o.source) == new_head)
         };
         let id = match p.ops.iter().position(same) {
             Some(i) => {
@@ -415,7 +454,7 @@ impl Doc {
                 if op.status != Status::Pending {
                     return Err("already resolved".into());
                 }
-                let text = apply(&g.text, &op)?;
+                let text = apply(&g.text, &op, g.ops())?;
                 g.text = text;
                 let change = crate::live::Change::Text(g.text.as_str().into());
                 self.commit(&mut g, change, 0);
@@ -585,8 +624,31 @@ mod tests {
         let stale = op(Kind::Replace, Some(Anchor { slide: 1, hash: 1 }), "# nope");
         let t = proposed_text(DECK, &[stale.clone(), insert]);
         assert_eq!(sources(&t), vec!["# A", "# B", "# C", "# D"]);
-        assert!(apply(DECK, &stale).is_err());
-        assert!(apply(DECK, &delete).is_ok());
+        assert!(apply(DECK, &stale, &[]).is_err());
+        assert!(apply(DECK, &delete, &[]).is_ok());
+    }
+
+    #[test]
+    fn inserts_after_the_same_slide_chain_in_order() {
+        let a = Op {
+            id: 1,
+            ..op(Kind::Insert, anchor_for(DECK, 1), "# X")
+        };
+        let b = Op {
+            id: 2,
+            ..op(Kind::Insert, anchor_for(DECK, 1), "# Y")
+        };
+        let ops = [a.clone(), b.clone()];
+        assert_eq!(
+            sources(&proposed_text(DECK, &ops)),
+            vec!["# A", "# X", "# Y", "# B", "# C"]
+        );
+        // Accepting one at a time keeps the order too: after X is in, Y goes after X.
+        let after_a = apply(DECK, &a, &ops).unwrap();
+        let mut accepted = ops.clone();
+        accepted[0].status = Status::Accepted;
+        let t = apply(&after_a, &b, &accepted).unwrap();
+        assert_eq!(sources(&t), vec!["# A", "# X", "# Y", "# B", "# C"]);
     }
 
     #[test]

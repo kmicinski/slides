@@ -179,6 +179,10 @@ pub struct AgentMessage {
     message: String,
     #[serde(default)]
     slide: Option<usize>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 pub async fn agent_send(
@@ -207,9 +211,36 @@ pub async fn agent_send(
             }
         );
     }
-    agent::start(app.clone(), doc, name, message, context)
+    let model = m
+        .model
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let ok = s
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-._".contains(c));
+            ok.then_some(s)
+                .ok_or((StatusCode::BAD_REQUEST, "bad model id".to_string()))
+        })
+        .transpose()?;
+    let effort = m
+        .effort
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            agent::EFFORTS
+                .contains(&s.as_str())
+                .then_some(s)
+                .ok_or((StatusCode::BAD_REQUEST, "bad effort".to_string()))
+        })
+        .transpose()?;
+    let opts = agent::RunOptions { model, effort };
+    agent::start(app.clone(), doc, name, message, context, opts)
         .map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(StatusCode::ACCEPTED)
+}
+
+/// Defaults for the Ask form's model/effort selects.
+pub async fn agent_defaults(State(app): State<Shared>) -> Json<Value> {
+    Json(json!({ "model": app.agent.model, "effort": app.agent.effort, "efforts": agent::EFFORTS }))
 }
 
 /// Today as YYYY-MM-DD (UTC) for the agent's prompt; civil-from-days, no chrono.

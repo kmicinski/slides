@@ -43,6 +43,8 @@ header button.ask { background: #b58900; color: #fdf6e3; border-color: #b58900; 
 .msg.assistant { align-self: flex-start; background: #fff; border: 1px solid #eee8d5; }
 .msg.tool { align-self: flex-start; color: #93a1a1; font-size: .8em; padding: .1rem .4rem; }
 .msg.live { align-self: flex-start; color: #b58900; font-style: italic; }
+.msg.draft { opacity: .7; white-space: pre-wrap; }
+#ask-form select { font-size: .8em; padding: .15rem .3rem; }
 .msg.error { align-self: flex-start; background: #fdecec; color: #dc322f; }
 .msg code { background: #eee8d5; padding: 0 .25em; border-radius: 3px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .9em; }
 #ask-form { flex-direction: column; align-items: stretch; gap: 0; margin: 0; border-top: 1px solid #d9d2bd; }

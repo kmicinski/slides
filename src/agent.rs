@@ -22,13 +22,29 @@ use tokio::process::{Child, Command};
 pub struct Agent {
     config: Option<PathBuf>,
     pub model: String,
+    pub effort: String,
     running: Mutex<HashMap<String, Child>>,
 }
+
+/// Per-message knobs from the Ask form (validated in `api.rs`).
+#[derive(Default, Clone)]
+pub struct RunOptions {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+pub const EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
 impl Agent {
     /// Writes the MCP config pointing at ourselves (mode 0600) when the token is set.
     pub fn new(bind: &str, token: Option<&str>) -> Agent {
         let model = std::env::var("SLIDES_AGENT_MODEL").unwrap_or_else(|_| "claude-opus-5".into());
+        // Slide edits are routine work: medium effort keeps turns short. The Ask
+        // form can raise it per message.
+        let effort = std::env::var("SLIDES_AGENT_EFFORT")
+            .ok()
+            .filter(|e| EFFORTS.contains(&e.as_str()))
+            .unwrap_or_else(|| "medium".into());
         let config = token.and_then(|token| {
             let port = bind.rsplit(':').next().unwrap_or("7100");
             let cfg = json!({ "mcpServers": { "slides": {
@@ -48,6 +64,7 @@ impl Agent {
         Agent {
             config,
             model,
+            effort,
             running: Mutex::new(HashMap::new()),
         }
     }
@@ -88,16 +105,17 @@ const PERSONA: &str = "\
 You are the slide-editing agent inside the `slides` app, working on a reveal.js deck with its author, \
 who is watching the editor next to you. The `slides` MCP tools are your only way to read or change the deck.
 
-How to work:
-- Read before you write: list_slides for the outline, get_slide for the slides you will touch, get_theme once for the theme's slide vocabulary (schemas and their example markup).
-- Make slide-sized changes: replace_slide, insert_slide, delete_slide. Use put_deck only when the author asks for a whole-deck rewrite.
+How to work — and work fast; the author is waiting:
+- Read once, then write: list_slides for the outline, get_slide only for the slides you will touch. Call get_theme only when you need a layout or schema you have not seen (its examples are the theme's vocabulary). Do not re-read what you already have.
+- Make slide-sized changes: replace_slide, insert_slide, delete_slide. Use put_deck only when the author asks for a whole-deck rewrite. When you have several slides to add or change, issue all the write calls in one turn (parallel tool calls) instead of one per turn.
+- Finish your turn as soon as the writes are in. Do not call await_review unless the author explicitly asks you to wait; their decisions and comments reach you in their next message (and via get_proposal).
 - Every write returns render diagnostics (math errors, stray `$`). Fix anything you introduced.
 - Deck syntax: `---` between blank lines starts a slide, `--` a vertical sub-slide, `Note:` starts speaker notes, `<!-- .slide: class=\"…\" -->` sets slide attributes, `$…$` / `$$…$$` are LaTeX (escape `%` as `\\%`).
 - Keep the author's voice and structure. Do what was asked; do not restyle or reorganise unasked.
 
 Review mode: when it is on, each write is queued as a *proposal* the author accepts or rejects slide by slide in the editor — it is not applied until they do. Give every write a one-sentence `note` saying what changed and why; the author reads it next to the diff. If get_proposal shows comments from the author on earlier proposals, address those first. Re-proposing the same slide replaces your earlier pending proposal for it.
 
-Reply when done with a short summary of what you proposed or changed and anything you want the author to decide. No preamble, no restating the request.";
+Reply when done with a short summary of what you proposed or changed and anything you want the author to decide. No preamble, no restating the request, no announcing what you are about to do.";
 
 fn label(block: &Value) -> String {
     let name = block["name"].as_str().unwrap_or("tool");
@@ -127,21 +145,28 @@ pub fn start(
     deck: String,
     message: String,
     context: String,
+    opts: RunOptions,
 ) -> Result<(), String> {
     app.agent.available()?;
     if app.agent.is_running(&deck) {
         return Err("the agent is already working on this deck".into());
     }
     doc.agent_push("user", &message);
-    tokio::spawn(run(app, doc, deck, message, context));
+    tokio::spawn(run(app, doc, deck, message, context, opts));
     Ok(())
 }
 
-async fn run(app: Shared, doc: Doc, deck: String, message: String, context: String) {
+async fn run(
+    app: Shared,
+    doc: Doc,
+    deck: String,
+    message: String,
+    context: String,
+    opts: RunOptions,
+) {
     let emit = |event: Value| doc.broadcast_agent(event);
     let mut resume = doc.agent_session();
     loop {
-        emit(json!({ "kind": "start" }));
         let cfg = app.agent.config.clone().unwrap();
         let system = format!(
             "{PERSONA}\n\n## Runtime context (from the slides server)\n- Deck: `{deck}`\n- Review mode: {}\n{context}",
@@ -151,20 +176,35 @@ async fn run(app: Shared, doc: Doc, deck: String, message: String, context: Stri
                 "off — your writes apply directly"
             }
         );
+        let model = opts
+            .model
+            .clone()
+            .unwrap_or_else(|| app.agent.model.clone());
+        let effort = opts
+            .effort
+            .clone()
+            .unwrap_or_else(|| app.agent.effort.clone());
         let mut args: Vec<String> = vec![
             "-p".into(), message.clone(),
             "--output-format".into(), "stream-json".into(), "--verbose".into(),
-            "--model".into(), app.agent.model.clone(),
+            // Partial events let the panel show "thinking…" / "writing <tool>…" while a turn runs.
+            "--include-partial-messages".into(),
+            "--model".into(), model.clone(),
+            "--effort".into(), effort.clone(),
+            // No skills: this run only ever talks to our MCP. (`--bare` would be
+            // leaner still, but it refuses OAuth credentials — API key only.)
+            "--disable-slash-commands".into(),
             "--mcp-config".into(), cfg.to_string_lossy().into_owned(), "--strict-mcp-config".into(),
             "--allowedTools".into(), "mcp__slides".into(),
-            "--disallowedTools".into(), "Bash,Task,NotebookEdit,Write,Edit,Read,Glob,Grep,WebSearch,WebFetch,KillShell,BashOutput".into(),
-            "--max-turns".into(), "60".into(),
+            "--disallowedTools".into(), "Bash,Task,Agent,Skill,TodoWrite,NotebookEdit,Write,Edit,Read,Glob,Grep,WebSearch,WebFetch,KillShell,BashOutput".into(),
+            "--max-turns".into(), "40".into(),
             "--append-system-prompt".into(), system,
         ];
         if let Some(s) = &resume {
             args.push("--resume".into());
             args.push(s.clone());
         }
+        emit(json!({ "kind": "start", "model": model, "effort": effort }));
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         let child = Command::new("claude")
             .args(&args)
@@ -207,6 +247,37 @@ async fn run(app: Shared, doc: Doc, deck: String, message: String, context: Stri
                 Some("system") if ev["subtype"] == "init" => {
                     if let Some(sid) = ev["session_id"].as_str() {
                         doc.set_agent_session(Some(sid.into()));
+                    }
+                }
+                // Partial chunks (--include-partial-messages): the raw API stream events.
+                Some("stream_event") => {
+                    let e = &ev["event"];
+                    match e["type"].as_str() {
+                        Some("content_block_start") => {
+                            let b = &e["content_block"];
+                            match b["type"].as_str() {
+                                Some("thinking") => {
+                                    emit(json!({ "kind": "phase", "text": "thinking…" }))
+                                }
+                                Some("tool_use") => {
+                                    let name = b["name"].as_str().unwrap_or("tool");
+                                    let tool = name.rsplit("__").next().unwrap_or(name);
+                                    emit(
+                                        json!({ "kind": "phase", "text": format!("writing {tool}…") }),
+                                    );
+                                }
+                                Some("text") => {
+                                    emit(json!({ "kind": "phase", "text": "replying…" }))
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some("content_block_delta") => {
+                            if let Some(t) = e["delta"]["text"].as_str() {
+                                emit(json!({ "kind": "delta", "text": t }));
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Some("assistant") => {

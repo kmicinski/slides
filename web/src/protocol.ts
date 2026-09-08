@@ -31,7 +31,7 @@ export interface StateView {
   pending: number;
   agent: { session: string | null; messages: AgentMsg[] };
 }
-export interface AgentEvent { kind: "start" | "text" | "tool" | "error" | "done"; text?: string }
+export interface AgentEvent { kind: "start" | "text" | "tool" | "error" | "done" | "phase" | "delta"; text?: string; model?: string; effort?: string }
 
 export type ServerMsg =
   | { type: "text"; text: string }

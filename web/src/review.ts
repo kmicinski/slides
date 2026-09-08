@@ -90,6 +90,29 @@ export function init(host: Host) {
   const stopBtn = $<HTMLButtonElement>("ask-stop");
   const sendBtn = $<HTMLButtonElement>("ask-send");
   let live: HTMLElement | null = null; // the "working…" line while a run is on
+  let phase = "working…";
+  let startedAt = 0;
+  let draft: HTMLElement | null = null; // assistant text streaming in (deltas)
+  const liveText = () => {
+    if (!live) return;
+    const secs = startedAt ? Math.round((Date.now() - startedAt) / 1000) : 0;
+    live.textContent = `${phase} ${secs ? `(${secs}s)` : ""}`;
+  };
+  setInterval(liveText, 1000);
+
+  // model / effort selects, remembered per browser
+  const modelSel = $<HTMLSelectElement>("ask-model");
+  const effortSel = $<HTMLSelectElement>("ask-effort");
+  try {
+    modelSel.value = localStorage.getItem("slides.ask.model") ?? "";
+    effortSel.value = localStorage.getItem("slides.ask.effort") ?? "medium";
+  } catch { /* storage may be unavailable */ }
+  fetch("/api/agent/defaults").then((r) => r.json()).then((d: { model: string; effort: string }) => {
+    modelSel.options[0].textContent = `default (${d.model.replace("claude-", "")})`;
+    if (!effortSel.value) effortSel.value = d.effort;
+  }).catch(() => {});
+  modelSel.onchange = () => { try { localStorage.setItem("slides.ask.model", modelSel.value); } catch {} };
+  effortSel.onchange = () => { try { localStorage.setItem("slides.ask.effort", effortSel.value); } catch {} };
 
   const bubble = (role: string, text: string) => {
     const el = document.createElement("div");
@@ -108,15 +131,16 @@ export function init(host: Host) {
     running = on;
     stopBtn.hidden = !on;
     sendBtn.disabled = on;
-    if (on && !live) live = bubble("live", "working…");
-    if (!on && live) { live.remove(); live = null; }
+    if (on) { phase = "starting…"; startedAt = Date.now(); if (!live) live = bubble("live", phase); }
+    if (!on && live) { live.remove(); live = null; startedAt = 0; }
+    if (!on && draft) { draft.remove(); draft = null; }
   };
   const send = async () => {
     const message = input.value.trim();
     if (!message || running) return;
     const at = host.cursorSlide();
     try {
-      await post(api("agent"), { message, slide: at?.slide ?? null });
+      await post(api("agent"), { message, slide: at?.slide ?? null, model: modelSel.value || null, effort: effortSel.value || null });
       input.value = "";
       bubble("user", message);
       setRunning(true);
@@ -217,8 +241,22 @@ export function init(host: Host) {
     },
     onAgent(ev: AgentEvent) {
       switch (ev.kind) {
-        case "start": setRunning(true); break;
-        case "text": bubble("assistant", ev.text ?? ""); if (live) transcript.append(live); break;
+        case "start":
+          setRunning(true);
+          if (ev.model) bubble("tool", `${ev.model.replace("claude-", "")} · effort ${ev.effort ?? "?"}`);
+          if (live) transcript.append(live);
+          break;
+        case "phase": phase = ev.text ?? "working…"; liveText(); break;
+        case "delta":
+          // Stream the reply as it is written; the final "text" event replaces it.
+          if (!draft) { draft = bubble("assistant draft", ""); if (live) transcript.append(live); }
+          draft.textContent += ev.text ?? "";
+          break;
+        case "text":
+          if (draft) { draft.remove(); draft = null; }
+          bubble("assistant", ev.text ?? "");
+          if (live) transcript.append(live);
+          break;
         case "tool": bubble("tool", ev.text ?? ""); if (live) transcript.append(live); break;
         case "error": bubble("error", ev.text ?? ""); break;
         case "done": setRunning(false); if (state?.pending) show("review"); break;

@@ -320,6 +320,17 @@ fn diagnostics_in(deck: &Deck, first: usize, last: usize) -> Vec<Diagnostic> {
         .collect()
 }
 
+/// The theme a deck renders with: the one it names, else the first installed.
+fn theme_of(app: &Shared, deck: &Deck) -> Option<String> {
+    deck.theme.clone().or_else(|| {
+        theme::list(&app.root)
+            .ok()?
+            .into_iter()
+            .next()
+            .map(|t| t.name)
+    })
+}
+
 fn summary(deck: &Deck) -> Value {
     json!({
         "title": deck.title,
@@ -403,7 +414,7 @@ fn proposed(doc: &crate::live::Doc, op: Value) -> Value {
         .unwrap_or_default();
     json!({
         "proposed": true,
-        "message": "review mode: queued for the author to accept or reject in the editor; nothing changed yet",
+        "message": "review mode: queued for the author to accept or reject in the editor; nothing changed yet. Slide positions keep referring to the current deck — to add several slides in a row, insert each one after the same slide, in order.",
         "op": op,
         "diagnostics": diagnostics,
     })
@@ -425,7 +436,7 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
                         json!({
                             "name": name,
                             "title": d.title,
-                            "theme": d.theme,
+                            "theme": theme_of(app, &d),
                             "slides": d.count(),
                             "diagnostics": d.diagnostics.len(),
                         })
@@ -436,8 +447,10 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
         "get_deck" => {
             let a: DeckArg = parse(&args)?;
             let doc = doc(app, &a.deck)?;
-            let mut v = summary(&doc.deck());
+            let d = doc.deck();
+            let mut v = summary(&d);
             v["name"] = json!(a.deck);
+            v["theme"] = json!(theme_of(app, &d));
             v["source"] = json!(doc.text());
             Ok(v)
         }
@@ -488,7 +501,9 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
                     })
                 })
                 .collect();
-            Ok(json!({ "name": a.deck, "title": deck.title, "slides": slides }))
+            Ok(
+                json!({ "name": a.deck, "title": deck.title, "theme": theme_of(app, &deck), "slides": slides }),
+            )
         }
         "get_slide" => {
             let a: SlideArg = parse(&args)?;
@@ -596,8 +611,14 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
             if !crate::valid_name(&a.theme) {
                 return Err("invalid theme name".into());
             }
-            let t = Theme::load(&app.root.join("themes").join(&a.theme))
-                .map_err(|e| format!("{e:#}"))?;
+            let t = Theme::load(&app.root.join("themes").join(&a.theme)).map_err(|e| {
+                let names: Vec<String> = theme::list(&app.root)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect();
+                format!("{e:#}; installed themes: {}", names.join(", "))
+            })?;
             serde_json::to_value(&t).map_err(|e| e.to_string())
         }
         "get_schema" => {
