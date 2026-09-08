@@ -1,7 +1,14 @@
-//! The password gate. One shared password (`SLIDES_PASSWORD`): the login form
-//! sets a session cookie, tools send it as a bearer token. Sessions live in
-//! memory and end with the process. Without a password the server is
-//! read-only — players are public anyway; editing routes refuse.
+//! The editing gate. Two modes:
+//!
+//! * `TRUST_PROXY_AUTH=true` — a reverse proxy (Authelia via Caddy, say) has
+//!   already authenticated the request and set `Remote-User`; its presence
+//!   is the whole check. The proxy MUST strip client-supplied `Remote-User`
+//!   on any path it lets through unauthenticated (the public players).
+//! * otherwise one shared password (`SLIDES_PASSWORD`): the login form sets a
+//!   session cookie, tools send it as a bearer token. Sessions live in memory
+//!   and end with the process. Without a password the server is read-only —
+//!   players are public anyway; editing routes refuse.
+//!
 //! TLS is the reverse proxy's job.
 
 use crate::Shared;
@@ -15,10 +22,16 @@ use std::time::Duration;
 use subtle::ConstantTimeEq;
 
 pub fn authorized(app: &Shared, headers: &HeaderMap) -> bool {
+    if app.trust_proxy {
+        return headers
+            .get("remote-user")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|u| !u.is_empty());
+    }
+    let header = |name| headers.get(name).and_then(|v| v.to_str().ok());
     let Some(password) = &app.password else {
         return false;
     };
-    let header = |name| headers.get(name).and_then(|v| v.to_str().ok());
     if let Some(token) = header(header::AUTHORIZATION).and_then(|v| v.strip_prefix("Bearer ")) {
         return eq(token, password);
     }
@@ -39,6 +52,14 @@ fn eq(a: &str, b: &str) -> bool {
 pub async fn gate(State(app): State<Shared>, req: Request, next: Next) -> Response {
     if authorized(&app, req.headers()) {
         return next.run(req).await;
+    }
+    if app.trust_proxy {
+        // The proxy should have authenticated this route; nothing to log in to here.
+        return (
+            StatusCode::UNAUTHORIZED,
+            "authentication is handled by the proxy",
+        )
+            .into_response();
     }
     if app.password.is_none() {
         return (

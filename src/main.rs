@@ -11,7 +11,9 @@
 //! ```
 //!
 //! Environment: `SLIDES_ROOT`, `SLIDES_BIND` (default `127.0.0.1:7100`),
-//! `SLIDES_PASSWORD` (unset ⇒ read-only: players are served, editing refuses).
+//! `SLIDES_PASSWORD` (unset ⇒ read-only: players are served, editing refuses),
+//! `TRUST_PROXY_AUTH=true` (the proxy's `Remote-User` header is the login;
+//! see `auth.rs`).
 
 mod api;
 mod auth;
@@ -33,6 +35,7 @@ use tower_http::services::ServeDir;
 pub struct App {
     pub root: PathBuf,
     pub password: Option<String>,
+    pub trust_proxy: bool,
     pub sessions: Mutex<HashSet<String>>,
     pub docs: Mutex<BTreeMap<String, Doc>>,
 }
@@ -82,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let app: Shared = Arc::new(App {
         root,
         password: env::var("SLIDES_PASSWORD").ok().filter(|p| !p.is_empty()),
+        trust_proxy: env::var("TRUST_PROXY_AUTH").is_ok_and(|v| v == "true" || v == "1"),
         sessions: Default::default(),
         docs: Default::default(),
     });
@@ -131,7 +135,9 @@ async fn main() -> anyhow::Result<()> {
         "slides: {} deck(s) under {}, {} — http://{bind}/",
         app.docs.lock().unwrap().len(),
         app.root.display(),
-        if app.password.is_some() {
+        if app.trust_proxy {
+            "editing enabled (proxy auth)"
+        } else if app.password.is_some() {
             "editing enabled"
         } else {
             "read-only (set SLIDES_PASSWORD)"

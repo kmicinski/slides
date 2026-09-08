@@ -141,6 +141,15 @@ gates editing and the API; players are public. Sessions live in memory, so a
 restart logs everyone out. Environment: `SLIDES_ROOT` (default `.`),
 `SLIDES_BIND` (default `127.0.0.1:7100`), `SLIDES_PASSWORD` (unset ⇒ read-only).
 
+Behind a proxy that does its own login (Authelia, oauth2-proxy, …), set
+`TRUST_PROXY_AUTH=true` instead of a password: any request carrying a
+`Remote-User` header is treated as logged in, and `/login` is never shown. The
+proxy must then (a) require login for everything except the public player
+paths — `/deck/<name>/` and its assets, `/engine/*`, `/themes/*` — but
+including `/deck/<name>/live` and `/deck/<name>/ws`, and (b) strip any
+client-supplied `Remote-User` on the paths it lets through anonymously.
+Tools reach `/api` with whatever session the proxy accepts.
+
 ## Developing
 
 `make test` runs the renderer's unit tests. The browser code is plain
