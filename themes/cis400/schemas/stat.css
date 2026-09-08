@@ -1,0 +1,16 @@
+/* ---------- Big figure with a label, for data slides ---------- */
+
+.reveal .stat {
+  font-size: 2.4em;
+  font-weight: 900;
+  color: var(--su-orange);
+  line-height: 1;
+  display: block;
+}
+
+.reveal .stat-label {
+  font-size: 0.9em;
+  color: var(--su-navy);
+  display: block;
+  margin-top: 0.15em;
+}

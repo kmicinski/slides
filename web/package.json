@@ -1,0 +1,13 @@
+{
+  "name": "slides-web",
+  "private": true,
+  "description": "Browser side of slides: the editor page and the live preview. tsc only, no bundler.",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "monaco-editor": "0.45.0",
+    "monaco-emacs": "0.3.0",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,16 @@
+# CIS400 — Cybersecurity & AI. The [reveal] table is passed to
+# Reveal.initialize() as-is; any option from https://revealjs.com/config/ works.
+[reveal]
+width = 1280
+height = 800
+margin = 0.06
+minScale = 0.2
+maxScale = 2.0
+transition = "slide"
+backgroundTransition = "fade"
+slideNumber = "c/t"
+hash = true
+history = true
+controls = true
+progress = true
+pdfSeparateFragments = false

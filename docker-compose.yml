@@ -1,0 +1,16 @@
+# SLIDES_PASSWORD=… docker compose up -d --build
+# Put TLS and the public hostname on a reverse proxy in front of 127.0.0.1:7100.
+services:
+  slides:
+    build: .
+    container_name: slides
+    ports:
+      - "127.0.0.1:7100:7100"
+    environment:
+      - SLIDES_PASSWORD=${SLIDES_PASSWORD:?SLIDES_PASSWORD is required}
+    volumes:
+      # Decks are data; themes are mounted too so schemas written through the
+      # API (and by hand) persist without a rebuild. Both must be writable by uid 1000.
+      - ./decks:/app/decks
+      - ./themes:/app/themes
+    restart: unless-stopped

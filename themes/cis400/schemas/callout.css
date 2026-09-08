@@ -1,0 +1,39 @@
+/* ---------- Callouts ---------- */
+
+.reveal .callout {
+  background: #fff4ec;
+  border-left: 5px solid var(--su-danger);
+  border-radius: 6px;
+  padding: 0.45em 0.85em;
+  margin: 0.38em 0;
+  font-size: 0.85em;
+  color: var(--su-ink);
+  box-shadow: 0 1px 4px rgba(0, 14, 84, 0.05);
+}
+
+.reveal .callout.note {
+  background: #eef2fb;
+  border-left-color: var(--su-navy);
+}
+
+.reveal .callout.good {
+  background: #eef8e9;
+  border-left-color: var(--su-good);
+}
+
+/* Threat / attacker emphasis — for offensive-security slides */
+.reveal .callout.threat {
+  background: #fdecec;
+  border-left-color: var(--su-danger);
+}
+
+/* Defense / blue-team emphasis */
+.reveal .callout.defense {
+  background: #e9f6f8;
+  border-left-color: var(--su-signal-deep);
+}
+
+.reveal .callout strong {
+  color: var(--su-orange-deep);
+}
+

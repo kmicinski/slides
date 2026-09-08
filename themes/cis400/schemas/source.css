@@ -1,0 +1,16 @@
+/* ---------- On-slide source citations ---------- */
+
+.reveal .source {
+  font-size: 0.5em;
+  color: var(--su-muted);
+  margin-top: 0.5em;
+  font-style: normal;
+  line-height: 1.3;
+}
+
+.reveal .source a,
+.reveal .source a:visited {
+  color: var(--su-muted);
+  border-bottom: 1px dotted var(--su-muted);
+}
+

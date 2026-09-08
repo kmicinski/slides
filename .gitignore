@@ -1,0 +1,6 @@
+/target
+/web/node_modules
+/web/dist
+/decks/*
+!/decks/.gitkeep
+.DS_Store

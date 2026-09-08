@@ -1,0 +1,79 @@
+/*
+ * Solarized Light for highlight.js
+ * Based on Ethan Schoonover's Solarized palette (http://ethanschoonover.com/solarized)
+ * Adapted for reveal.js code blocks in the CIS352 Rust deck.
+ */
+
+.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 0.5em;
+  background: #fdf6e3;   /* base3 */
+  color: #657b83;        /* base00 */
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #93a1a1;        /* base1 */
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-addition {
+  color: #859900;        /* green */
+}
+
+.hljs-number,
+.hljs-string,
+.hljs-meta .hljs-meta-string,
+.hljs-literal,
+.hljs-doctag,
+.hljs-regexp {
+  color: #2aa198;        /* cyan */
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #268bd2;        /* blue */
+}
+
+.hljs-attribute,
+.hljs-attr,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-class .hljs-title,
+.hljs-type {
+  color: #b58900;        /* yellow */
+}
+
+.hljs-symbol,
+.hljs-bullet,
+.hljs-subst,
+.hljs-meta,
+.hljs-meta .hljs-keyword,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-link {
+  color: #cb4b16;        /* orange */
+}
+
+.hljs-built_in,
+.hljs-deletion {
+  color: #dc322f;        /* red */
+}
+
+.hljs-formula {
+  background: #eee8d5;   /* base2 */
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}

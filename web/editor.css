@@ -1,0 +1,33 @@
+/* App chrome: solarized-light, matching the editor. The slides themselves are styled by their theme. */
+:root { --editor-width: 50vw; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column;
+  font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: #fdf6e3; color: #586e75;
+}
+a { color: #268bd2; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+header { display: flex; gap: 1rem; align-items: baseline; padding: .45rem .9rem; background: #eee8d5; border-bottom: 1px solid #d9d2bd; }
+header .spacer { flex: 1; }
+#status { color: #93a1a1; font-size: .85em; }
+
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--editor-width) 6px 1fr; }
+#editor { min-width: 0; }
+#divider { background: #eee8d5; cursor: col-resize; }
+#divider:hover { background: #b58900; }
+#preview { border: 0; width: 100%; height: 100%; background: #fff; }
+
+/* deck list and login */
+.page { display: block; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+.page h1 { font-weight: 600; color: #cb4b16; }
+.decks { list-style: none; padding: 0; }
+.decks li { padding: .35rem 0; border-bottom: 1px solid #eee8d5; }
+.decks .name { color: #93a1a1; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .8em; margin-left: .5rem; }
+.decks .edit { float: right; }
+form { margin-top: 1.5rem; display: flex; gap: .5rem; align-items: center; }
+input, select, button { font: inherit; padding: .3rem .5rem; border: 1px solid #d9d2bd; border-radius: 4px; background: #fff; color: inherit; }
+button { background: #eee8d5; cursor: pointer; }
+.login { flex-direction: column; align-items: flex-start; }
+.error { color: #dc322f; }

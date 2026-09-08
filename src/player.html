@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- Generated from deck.md by slides. Edit deck.md, not this file. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>{{TITLE}}</title>
+    <link rel="stylesheet" href="../../engine/reveal/dist/reset.css" />
+    <link rel="stylesheet" href="../../engine/reveal/dist/reveal.css" />
+    <link rel="stylesheet" href="../../engine/katex/katex.min.css" />
+    {{THEME_CSS}}
+  </head>
+  <body>
+    <div class="reveal">
+      <div class="slides">
+{{SLIDES}}
+      </div>
+    </div>
+    <script src="../../engine/reveal/dist/reveal.js"></script>
+    <script src="../../engine/reveal/plugin/highlight/highlight.js"></script>
+    <script src="../../engine/reveal/plugin/notes/notes.js"></script>
+    <script>
+      Reveal.initialize(Object.assign({{OPTIONS}}, { plugins: [RevealHighlight, RevealNotes] }));
+    </script>
+    {{LIVE}}
+  </body>
+</html>

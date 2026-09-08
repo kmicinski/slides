@@ -1,0 +1,21 @@
+[package]
+name = "slides"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["ws"] }
+futures-util = "0.3.34"
+katex = "0.4.6"
+pulldown-cmark = "0.13.4"
+rand = "0.10.2"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+subtle = "2.6.1"
+tokio = { version = "1.53.1", features = ["full"] }
+toml = "1.1.5"
+tower-http = { version = "0.7.1", features = ["fs"] }
+walkdir = "2.5.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
