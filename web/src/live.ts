@@ -70,14 +70,38 @@ function apply(cols: PatchSlide[][]) {
   } else {
     Reveal.layout();
   }
+  if (awaiting > 0) awaiting--;
+  if (awaiting === 0 && parked) {
+    const { h, v } = parked;
+    parked = null;
+    Reveal.slide(h, v);
+  }
 }
 
 let ws: WebSocket | null = null;
 let proposed = false; // which deck this preview shows (see `view` in src/live.rs)
+// Patches we asked for and have not applied yet: the one every connection
+// opens with, and one per `view` switch. A `goto` that arrives meanwhile is
+// parked until they land — its indices refer to the deck we asked for, which
+// may not have the slide yet (or have it somewhere else).
+let awaiting = 1;
+let parked: { h: number; v: number } | null = null;
+
+function goto(h: number, v: number) {
+  if (awaiting > 0) parked = { h, v };
+  else Reveal.slide(h, v);
+}
+
+function askView() {
+  if (ws?.readyState !== WebSocket.OPEN) return; // onopen sends it
+  awaiting++;
+  ws.send(JSON.stringify({ type: "view", proposed }));
+}
 
 function connect() {
+  awaiting = 1;
   ws = new WebSocket(socketUrl());
-  ws.onopen = () => { if (proposed) ws?.send(JSON.stringify({ type: "view", proposed })); };
+  ws.onopen = () => { if (proposed) askView(); };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data) as ServerMsg;
     if (m.type === "patch") apply(m.cols);
@@ -87,12 +111,17 @@ function connect() {
 
 window.addEventListener("message", (e) => {
   if (e.origin !== location.origin) return;
-  if (e.data?.type === "goto") Reveal.slide(e.data.h, e.data.v);
+  if (e.data?.type === "goto") goto(Number(e.data.h) || 0, Number(e.data.v) || 0);
   if (e.data?.type === "view") {
     proposed = !!e.data.proposed;
-    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "view", proposed }));
+    askView();
   }
 });
+// The editor may have posted `view`/`goto` before this script ran (it enters
+// compare mode as soon as its first state arrives, while the proposed pane is
+// still loading) — those messages are lost. Tell it we are listening now, and
+// it repeats what it wants (see `Player` in editor.ts).
+if (window.parent !== window) window.parent.postMessage({ type: "ready" }, location.origin);
 
 // ---- click → source line ------------------------------------------------------
 

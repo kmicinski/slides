@@ -14,6 +14,35 @@ const statusEl = document.getElementById("status")!;
 const preview = document.getElementById("preview") as HTMLIFrameElement;
 const status = (s: string) => { statusEl.textContent = s; };
 
+// ---- player iframes -----------------------------------------------------------
+
+/**
+ * One player iframe. It remembers which deck and slide it was last told to
+ * show and repeats that when the frame says it is `ready` — a message posted
+ * before the frame's script runs (it loads reveal.js first, and the proposed
+ * pane starts hidden) is simply dropped, and a reloaded frame starts over.
+ */
+class Player {
+  proposed = false;
+  at: { h: number; v: number } | null = null;
+  constructor(readonly frame: HTMLIFrameElement) {}
+  private post(m: unknown) { this.frame.contentWindow?.postMessage(m, location.origin); }
+  view(proposed: boolean) { this.proposed = proposed; this.post({ type: "view", proposed }); }
+  goto(h: number, v: number) { this.at = { h, v }; this.post({ type: "goto", h, v }); }
+  repeat() {
+    this.post({ type: "view", proposed: this.proposed });
+    if (this.at) this.post({ type: "goto", ...this.at });
+  }
+}
+const players = {
+  current: new Player(preview),
+  proposed: new Player(document.getElementById("preview2") as HTMLIFrameElement),
+};
+window.addEventListener("message", (e) => {
+  if (e.origin !== location.origin || e.data?.type !== "ready") return;
+  for (const p of Object.values(players)) if (p.frame.contentWindow === e.source) p.repeat();
+});
+
 /** 32-bit FNV-1a over code points; must match `fnv1a` in src/live.rs. */
 function fnv1a(s: string): number {
   let h = 0x811c9dc5;
@@ -45,7 +74,7 @@ function follow(line: number) {
   const key = `${h},${v}`;
   if (key !== shown) {
     shown = key;
-    preview.contentWindow?.postMessage({ type: "goto", h, v }, location.origin);
+    players.current.goto(h, v);
   }
 }
 
@@ -134,8 +163,8 @@ function connect(editor: monaco.editor.IStandaloneCodeEditor) {
       previewProposed = on;
       document.getElementById("preview-badge")!.hidden = !on;
       document.getElementById("preview-pane")!.classList.toggle("proposed", on);
-      preview.contentWindow?.postMessage({ type: "view", proposed: on }, location.origin);
-      if (on && at) preview.contentWindow?.postMessage({ type: "goto", h: at.h, v: at.v }, location.origin);
+      players.current.view(on);
+      if (on && at) players.current.goto(at.h, at.v);
       if (!on) { shown = ""; follow(editor.getPosition()?.lineNumber ?? 1); }
     },
     compare(op) {
@@ -144,7 +173,6 @@ function connect(editor: monaco.editor.IStandaloneCodeEditor) {
       const pane2 = document.getElementById("pane-proposed")!;
       const overlay = document.getElementById("delete-overlay")!;
       const label1 = document.getElementById("label-current")!;
-      const p2 = document.getElementById("preview2") as HTMLIFrameElement;
       comparing = !!op;
       pane.classList.toggle("compare", comparing);
       bar.hidden = pane2.hidden = label1.hidden = !comparing;
@@ -154,18 +182,18 @@ function connect(editor: monaco.editor.IStandaloneCodeEditor) {
         return;
       }
       // Top: the real deck at the slide the op touches (for an insert, the one it follows).
-      preview.contentWindow?.postMessage({ type: "view", proposed: false }, location.origin);
+      players.current.view(false);
       if (op.line) {
         const { h, v } = slideAt(op.line);
         shown = `${h},${v}`;
-        preview.contentWindow?.postMessage({ type: "goto", h, v }, location.origin);
+        players.current.goto(h, v);
       } else if (op.kind === "deck" || !op.slide) {
-        preview.contentWindow?.postMessage({ type: "goto", h: 0, v: 0 }, location.origin);
+        players.current.goto(0, 0);
       }
       overlay.hidden = op.kind !== "delete";
       // Bottom: the forked deck at where the op's result landed.
-      p2.contentWindow?.postMessage({ type: "view", proposed: true }, location.origin);
-      if (op.proposed_col) p2.contentWindow?.postMessage({ type: "goto", h: op.proposed_col - 1, v: op.proposed_row - 1 }, location.origin);
+      players.proposed.view(true);
+      if (op.proposed_col) players.proposed.goto(op.proposed_col - 1, op.proposed_row - 1);
     },
     cursorSlide() {
       const line = editor.getPosition()?.lineNumber;
