@@ -18,6 +18,7 @@
 //! model; see `agent.rs`).
 
 mod agent;
+mod assets;
 mod api;
 mod auth;
 mod deck;
@@ -29,6 +30,7 @@ mod review;
 mod theme;
 
 use axum::routing::{get, post, put};
+use axum::response::IntoResponse;
 use axum::{Router, middleware};
 use live::Doc;
 use std::collections::{BTreeMap, HashSet};
@@ -77,6 +79,14 @@ impl App {
 }
 
 /// Deck, theme and schema names double as directory names and URL segments.
+/// 404 for any path with a dot-prefixed segment (see the deck router).
+async fn no_dotfiles(req: axum::extract::Request, next: middleware::Next) -> axum::response::Response {
+    if req.uri().path().split('/').any(|seg| seg.starts_with('.')) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(req).await
+}
+
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
@@ -118,7 +128,14 @@ async fn main() -> anyhow::Result<()> {
                 },
             ),
         )
-        .fallback_service(ServeDir::new(app.root.join("decks")));
+        // Deck folders are public (players, images), but not their dotfiles:
+        // `.slides.json` holds proposals and the agent transcript, `.sources/`
+        // the PDFs fetch_asset downloaded.
+        .fallback_service(
+            Router::new()
+                .fallback_service(ServeDir::new(app.root.join("decks")))
+                .layer(middleware::from_fn(no_dotfiles)),
+        );
     let editing = Router::new()
         .route("/new", axum::routing::post(pages::create))
         .route("/edit/{name}", get(pages::editor))

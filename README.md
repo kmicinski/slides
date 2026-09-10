@@ -148,8 +148,22 @@ through untouched. Tools (`src/mcp.rs`):
 | `replace_slide` / `insert_slide` / `delete_slide` | edit one slide by position; separators are managed for you |
 | `list_themes` / `get_theme` | themes and their schemas with examples — the vocabulary |
 | `get_schema` / `put_schema` | one schema's CSS + example; write to add a slide design |
+| `fetch_asset` | download a public URL into the deck: images go on slides as `![](file)`, PDFs into the deck's sources |
+| `pdf_text` / `render_pdf_page` | find where a figure is in a fetched PDF, look at the page (the reply carries a preview image), and cut a region out to a PNG in the deck folder |
+| `list_assets` | images in the deck folder and PDFs in its sources |
 | `open_changeset` | review mode: group the writes that follow under a title the author can accept or reject in one go |
 | `get_proposal` / `await_review` / `withdraw_proposal` | review mode: see each changeset and op's status and the author's comments, wait for a decision, take an op or a changeset back |
+
+Assets: a deck folder is public, so images the tools save there are served
+at `/deck/<name>/<file>` and go into `export.zip`; slides use them as
+`![caption](file.png)`. Downloaded PDFs live in `decks/<name>/.sources/`,
+which is neither served (dotfiles are 404 on the deck router — that also
+keeps `.slides.json` private) nor exported. Fetching is limited to public
+http(s) hosts: nothing on the LAN or the host itself. The PDF tools need
+poppler (`pdfinfo`, `pdftotext`, `pdftoppm`; the image installs
+`poppler-utils`). The in-app agent knows the routine — fetch the paper,
+`pdf_text` for "Figure 1", look at the page, crop, check the preview, put the
+markdown on a slide.
 
 Slides are addressed by their 1-based position in presentation order (the
 "n of m" the player shows). Slide edits are spliced into the source under the

@@ -110,6 +110,7 @@ How to work — and work fast; the author is waiting:
 - Make slide-sized changes: replace_slide, insert_slide, delete_slide. Use put_deck only when the author asks for a whole-deck rewrite. When you have several slides to add or change, issue all the write calls in one turn (parallel tool calls) instead of one per turn.
 - Finish your turn as soon as the writes are in. Do not call await_review unless the author explicitly asks you to wait; their decisions and comments reach you in their next message (and via get_proposal).
 - Every write returns render diagnostics (math errors, stray `$`). Fix anything you introduced.
+- Images and PDFs from the web: fetch_asset downloads a URL into the deck (images become `![…](name.png)` right away; PDFs go to the deck's sources). To put a figure from a paper on a slide: pdf_text with `query` to find the page, render_pdf_page without `name` to look at it, then render_pdf_page with `crop` (fractions of the page: x, y, w, h) and a `name` to save the PNG — check the preview it returns, adjust the crop if it clipped the figure — and put `![caption](name.png)` on the slide. Include the figure's caption or a source line.
 - Deck syntax: `---` between blank lines starts a slide, `--` a vertical sub-slide, `Note:` starts speaker notes, `<!-- .slide: class=\"…\" -->` sets slide attributes, `$…$` / `$$…$$` are LaTeX (escape `%` as `\\%`).
 - Keep the author's voice and structure. Do what was asked; do not restyle or reorganise unasked.
 

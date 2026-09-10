@@ -8,8 +8,8 @@ COPY web/ .
 RUN npx tsc
 
 FROM rust:1-slim-bookworm AS build
-# KaTeX runs in an embedded QuickJS, which is C.
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+# KaTeX runs in an embedded QuickJS, which is C; reqwest's TLS (aws-lc) builds with cmake.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -19,7 +19,8 @@ RUN cargo build --release
 
 FROM debian:bookworm-slim
 # git + certs: the in-app agent runs the (bind-mounted) `claude` CLI, which expects them.
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+# poppler-utils: pdftoppm / pdftotext / pdfinfo for the fetch_asset / pdf tools (src/assets.rs).
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates poppler-utils && rm -rf /var/lib/apt/lists/*
 RUN useradd -u 1000 -m slides
 WORKDIR /app
 COPY --from=build /build/target/release/slides /usr/local/bin/slides

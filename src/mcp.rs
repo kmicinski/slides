@@ -131,7 +131,7 @@ pub async fn handler(State(app): State<Shared>, headers: HeaderMap, body: String
         "ping" => ok(id, json!({})),
         "tools/list" => ok(id, json!({ "tools": tool_catalog() })),
         "tools/call" => match tools_call(&app, req.params).await {
-            Ok(v) => ok(id, tool_text(&v)),
+            Ok(v) => ok(id, tool_result(v)),
             Err(msg) => ok(id, tool_error(&msg)),
         },
         "resources/list" => ok(id, json!({ "resources": [] })),
@@ -147,6 +147,22 @@ fn tool_text(value: &Value) -> Value {
         "structuredContent": value,
         "isError": false
     })
+}
+
+/// A tool reply; a `_preview_png` (base64) in the value becomes an image
+/// content block the model can look at (see assets::render_page).
+fn tool_result(mut value: Value) -> Value {
+    let image = value
+        .as_object_mut()
+        .and_then(|o| o.remove("_preview_png"))
+        .and_then(|p| p.as_str().map(String::from));
+    let mut r = tool_text(&value);
+    if let Some(data) = image {
+        r["content"].as_array_mut().unwrap().push(json!({
+            "type": "image", "data": data, "mimeType": "image/png"
+        }));
+    }
+    r
 }
 
 fn tool_error(msg: &str) -> Value {
@@ -236,6 +252,26 @@ fn tool_catalog() -> Vec<Value> {
             "name": "withdraw_proposal",
             "description": "Withdraw one pending op (`op`), every pending op of one changeset (`changeset`), or every pending op of the deck's proposal when both are omitted.",
             "inputSchema": obj(json!({ "deck": deck, "op": { "type": "integer" }, "changeset": { "type": "integer" } }), &["deck"])
+        }),
+        json!({
+            "name": "fetch_asset",
+            "description": "Download a public http(s) URL into the deck. Images (png, jpg, gif, webp, svg) land in the deck folder and the reply gives the markdown to put on a slide. PDFs land in the deck's sources (not served, not exported) for pdf_text / render_pdf_page. `name` is the file name to save as (extension added); default: the URL's last path segment.",
+            "inputSchema": obj(json!({ "deck": deck, "url": { "type": "string" }, "name": { "type": "string" } }), &["deck", "url"])
+        }),
+        json!({
+            "name": "pdf_text",
+            "description": "Text of a fetched PDF: one page's text (`page`), or — with `query` — the pages the phrase occurs on with a snippet each (e.g. query \"Figure 1\" to find where a figure and its caption are). Without either, the first page.",
+            "inputSchema": obj(json!({ "deck": deck, "file": { "type": "string", "description": "As fetch_asset / list_assets reported it." }, "page": { "type": "integer" }, "query": { "type": "string" } }), &["deck", "file"])
+        }),
+        json!({
+            "name": "render_pdf_page",
+            "description": "Look at a page of a fetched PDF, or cut a figure out of it. Returns a preview image of the page or region so you can see it. Without `name` nothing is saved — use that to find the figure and pick the crop. With `crop` (fractions of the page: x, y from the top-left corner, w, h of the region, all 0–1) and `name`, saves the region as a PNG in the deck folder (default 200 dpi) and returns the markdown for a slide. Check the preview and re-crop with the same name if it clipped the figure or caught neighbouring text.",
+            "inputSchema": obj(json!({ "deck": deck, "file": { "type": "string" }, "page": { "type": "integer" }, "crop": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["x", "y", "w", "h"] }, "name": { "type": "string", "description": "File name for the PNG, e.g. fig1 or figures/fig1." }, "dpi": { "type": "number" } }), &["deck", "file", "page"])
+        }),
+        json!({
+            "name": "list_assets",
+            "description": "Images in the deck folder (with the markdown to use them) and PDFs in its sources.",
+            "inputSchema": obj(json!({ "deck": deck }), &["deck"])
         }),
         json!({
             "name": "list_themes",
@@ -403,6 +439,37 @@ struct PutSchemaArg {
     schema: String,
     css: String,
     example: String,
+}
+
+#[derive(Deserialize)]
+struct FetchArg {
+    deck: String,
+    url: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PdfTextArg {
+    deck: String,
+    file: String,
+    #[serde(default)]
+    page: Option<usize>,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RenderArg {
+    deck: String,
+    file: String,
+    page: usize,
+    #[serde(default)]
+    crop: Option<crate::assets::Crop>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    dpi: Option<f64>,
 }
 
 fn parse<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T, String> {
@@ -615,6 +682,36 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
                 d.resolve(*id, crate::review::Action::Withdraw)?;
             }
             Ok(json!({ "withdrawn": ids }))
+        }
+        "fetch_asset" => {
+            let a: FetchArg = parse(&args)?;
+            doc(app, &a.deck)?;
+            let dir = app.root.join("decks").join(&a.deck);
+            crate::assets::fetch(&dir, &a.deck, &a.url, a.name.as_deref())
+                .await
+                .map_err(|e| format!("{e:#}"))
+        }
+        "pdf_text" => {
+            let a: PdfTextArg = parse(&args)?;
+            doc(app, &a.deck)?;
+            let dir = app.root.join("decks").join(&a.deck);
+            crate::assets::text(&dir, &a.file, a.page, a.query.as_deref())
+                .await
+                .map_err(|e| format!("{e:#}"))
+        }
+        "render_pdf_page" => {
+            let a: RenderArg = parse(&args)?;
+            doc(app, &a.deck)?;
+            let dir = app.root.join("decks").join(&a.deck);
+            crate::assets::render_page(&dir, &a.deck, &a.file, a.page, a.crop, a.name.as_deref(), a.dpi)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        }
+        "list_assets" => {
+            let a: DeckArg = parse(&args)?;
+            doc(app, &a.deck)?;
+            let dir = app.root.join("decks").join(&a.deck);
+            crate::assets::list(&dir, &a.deck).map_err(|e| format!("{e:#}"))
         }
         "list_themes" => {
             let themes = theme::list(&app.root).map_err(|e| format!("{e:#}"))?;
