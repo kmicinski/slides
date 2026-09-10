@@ -117,7 +117,9 @@ require(["vs/editor/editor.main", "monaco-emacs"], (_monaco, emacs) => {
     fontFamily: '"JetBrains Mono", "SF Mono", Menlo, Consolas, monospace',
     lineHeight: 1.6,
     lineNumbers: "on",
-    wordWrap: "on",
+    // Soft-wrap at a readable measure rather than the pane edge (narrower panes still wrap at their width).
+    wordWrap: "bounded",
+    wordWrapColumn: 100,
     minimap: { enabled: false },
     scrollBeyondLastLine: true,
     automaticLayout: true,
