@@ -135,6 +135,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/decks/{name}/proposal/{op}/{action}",
             post(api::op_action),
         )
+        .route(
+            "/api/decks/{name}/changeset/{id}/{action}",
+            post(api::changeset_action),
+        )
         .route("/api/agent/defaults", get(api::agent_defaults))
         .route("/api/decks/{name}/agent", post(api::agent_send))
         .route("/api/decks/{name}/agent/stop", post(api::agent_stop))

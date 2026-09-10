@@ -17,6 +17,7 @@
 //! GET  /api/decks/{name}/state                     → review state view (see review.rs)
 //! PUT  /api/decks/{name}/review        ← {review}  toggle review mode for the deck
 //! POST /api/decks/{name}/proposal/{op}/{action}    accept | reject | comment {comment} | withdraw
+//! POST /api/decks/{name}/changeset/{id}/{action}   accept | reject | withdraw every pending op of a changeset
 //! POST /api/decks/{name}/proposal/clear            drop resolved ops
 //! POST /api/decks/{name}/agent         ← {message, slide?}   start an agent run
 //! POST /api/decks/{name}/agent/stop, /agent/reset
@@ -25,7 +26,7 @@
 //! Authenticate with the session cookie or `Authorization: Bearer <SLIDES_PASSWORD>`.
 
 use crate::deck::Diagnostic;
-use crate::review::{Action, Kind};
+use crate::review::{Action, BatchAction, Kind};
 use crate::theme::{self, Theme};
 use crate::{Shared, agent, valid_name};
 use axum::Json;
@@ -163,6 +164,25 @@ pub async fn op_action(
     doc.resolve(op, action)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(doc.state_view()))
+}
+
+pub async fn changeset_action(
+    State(app): State<Shared>,
+    Path((name, id, action)): Path<(String, u32, String)>,
+) -> ApiResult<Json<Value>> {
+    let doc = doc_of(&app, &name)?;
+    let action = match action.as_str() {
+        "accept" => BatchAction::Accept,
+        "reject" => BatchAction::Reject,
+        "withdraw" => BatchAction::Withdraw,
+        _ => return Err((StatusCode::NOT_FOUND, "no such action".into())),
+    };
+    let result = doc
+        .resolve_changeset(id, action)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let mut v = doc.state_view();
+    v["result"] = result;
+    Ok(Json(v))
 }
 
 pub async fn clear_resolved(

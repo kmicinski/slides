@@ -7,9 +7,14 @@
 // carries a rendered thumbnail of the proposed slide, and selecting one puts
 // the preview into *compare* mode — the current deck above, the proposed deck
 // below, both parked on that slide — with prev/next to step through the
-// proposal. The text diff is there too, folded away.
+// changeset. The text diff is there too, folded away.
+//
+// Ops are grouped by *changeset* — one batch of related edits (an Ask turn,
+// or what a remote session put under one `open_changeset`). A changeset can
+// be accepted or rejected whole from its header, or stepped through op by op;
+// prev/next in the compare bar stay inside the changeset being reviewed.
 
-import type { AgentEvent, AgentMsg, OpView, StateView } from "./protocol.js";
+import type { AgentEvent, AgentMsg, ChangesetView, OpView, StateView } from "./protocol.js";
 
 export interface Host {
   deck: string;
@@ -69,6 +74,10 @@ function diffHtml(current: string | null, source: string, kind: OpView["kind"]):
 }
 
 // ---- describing an op ---------------------------------------------------------
+
+function titleOf(cs: ChangesetView): string {
+  return cs.title || "untitled changeset";
+}
 
 function where(op: OpView): string {
   if (op.kind === "deck") return "whole deck";
@@ -207,9 +216,22 @@ export function init(host: Host) {
     if (c !== null) void act(op, "comment", c);
   };
 
+  const batch = (cs: ChangesetView, action: "accept" | "reject" | "withdraw") =>
+    post(api(`changeset/${cs.id}/${action}`)).then(async (r) => {
+      const v = (await r.json()) as StateView & { result?: { skipped?: { op: number; why: string }[] } };
+      const skipped = v.result?.skipped ?? [];
+      if (action === "accept" && skipped.length) alert(`${skipped.length} change${skipped.length > 1 ? "s" : ""} could not be merged and stay${skipped.length > 1 ? "" : "s"} pending:\n` + skipped.map((s) => `· ${s.why}`).join("\n"));
+    }).catch((e) => alert(e.message));
+  const confirmBatch = (cs: ChangesetView, action: "accept" | "reject") => {
+    const n = cs.pending + (action === "reject" ? cs.stale : 0);
+    if (n <= 1 || confirm(`${action === "accept" ? "Accept" : "Reject"} all ${n} pending changes in “${titleOf(cs)}”?`)) void batch(cs, action);
+  };
+
   let selected: number | null = null; // op id shown in compare mode
-  const pendingOps = () => state?.ops.filter((o) => o.status === "pending" && !o.stale) ?? [];
+  /** Pending, mergeable ops — of one changeset, or of the whole proposal. */
+  const pendingOps = (cs?: number) => state?.ops.filter((o) => o.status === "pending" && !o.stale && (cs === undefined || o.changeset === cs)) ?? [];
   const current = () => state?.ops.find((o) => o.id === selected) ?? null;
+  const csOf = (op: OpView) => state?.changesets.find((c) => c.id === op.changeset) ?? null;
 
   const bar = $("compare-bar");
   const syncCompare = () => {
@@ -222,25 +244,31 @@ export function init(host: Host) {
     }
     if (proposedShown) setProposed(false);
     host.compare(op);
-    const ps = pendingOps();
+    const cs = csOf(op);
+    const ps = pendingOps(op.changeset);
     $("cmp-pos").textContent = `${ps.findIndex((o) => o.id === op.id) + 1} / ${ps.length}`;
-    $("cmp-title").textContent = `${op.kind} · ${where(op)}${op.note ? " — " + op.note : ""}`;
+    $("cmp-title").textContent = `${cs ? titleOf(cs) + " · " : ""}${op.kind} · ${where(op)}${op.note ? " — " + op.note : ""}`;
+    $("cmp-accept-all").hidden = ps.length < 2;
     $("label-current").textContent = op.kind === "insert" ? `current · slide ${op.slide ?? "—"} (new slide goes after this)` : `current · slide ${op.slide ?? "—"}`;
     $("label-proposed").textContent = op.kind === "delete" ? `proposed · slide ${op.proposed_slide ?? "—"} (what follows)` : `proposed · slide ${op.proposed_slide ?? "—"}`;
     for (const c of opsEl.children) c.classList.toggle("selected", (c as HTMLElement).dataset.op === String(op.id));
     if (op.line) host.gotoLine(op.line);
   };
   const select = (op: OpView | null) => { selected = op?.id ?? null; syncCompare(); };
+  /** Prev/next within the selected op's changeset; with nothing selected, the first pending op anywhere. */
   const step = (d: 1 | -1) => {
-    const ps = pendingOps();
+    const cur = current();
+    const ps = pendingOps(cur?.changeset);
     if (!ps.length) return select(null);
     const i = ps.findIndex((o) => o.id === selected);
     select(ps[i < 0 ? (d > 0 ? 0 : ps.length - 1) : (i + d + ps.length) % ps.length]);
   };
+  const acceptRest = () => { const op = current(); const cs = op && csOf(op); if (cs) confirmBatch(cs, "accept"); };
   $("cmp-prev").onclick = () => step(-1);
   $("cmp-next").onclick = () => step(1);
   $("cmp-close").onclick = () => select(null);
   $("cmp-accept").onclick = () => { const op = current(); if (op) void act(op, "accept"); };
+  $("cmp-accept-all").onclick = acceptRest;
   $("cmp-reject").onclick = () => { const op = current(); if (op) void act(op, "reject"); };
   $("cmp-comment").onclick = () => { const op = current(); if (op) askComment(op); };
   document.addEventListener("keydown", (e) => {
@@ -251,6 +279,7 @@ export function init(host: Host) {
       case "n": case "]": step(1); break;
       case "p": case "[": step(-1); break;
       case "a": if (op) void act(op, "accept"); break;
+      case "A": acceptRest(); break;
       case "r": if (op) void act(op, "reject"); break;
       case "c": if (op) askComment(op); break;
       case "Escape": select(null); break;
@@ -297,6 +326,50 @@ export function init(host: Host) {
     return el;
   };
 
+  // ---- changeset groups
+  const folded = new Map<number, boolean>(); // author's explicit fold/unfold, by changeset id
+  const group = (cs: ChangesetView, ops: OpView[]): HTMLElement => {
+    const el = document.createElement("section");
+    const live = cs.pending + cs.stale;
+    const done = !live && !cs.open;
+    const isFolded = folded.get(cs.id) ?? done;
+    el.className = `cs${cs.open ? " open" : ""}${done ? " done" : ""}${isFolded ? " folded" : ""}`;
+    el.dataset.cs = String(cs.id);
+    const counts: string[] = [];
+    if (cs.pending) counts.push(`<span class="pend">${cs.pending} pending</span>`);
+    if (cs.stale) counts.push(`<span class="stale">${cs.stale} stale</span>`);
+    if (cs.accepted) counts.push(`${cs.accepted} accepted`);
+    if (cs.rejected) counts.push(`${cs.rejected} rejected`);
+    el.innerHTML = `
+      <div class="cs-head" title="${esc(new Date(cs.created * 1000).toLocaleString())}">
+        <button class="fold" title="fold / unfold">${isFolded ? "▸" : "▾"}</button>
+        <span class="cs-title${cs.title ? "" : " untitled"}">${esc(titleOf(cs))}</span>
+        ${cs.open ? `<span class="writing" title="still taking writes from the tool that opened it">open</span>` : ""}
+        <span class="cs-counts">${counts.join(" · ")}</span>
+      </div>
+      ${cs.note ? `<div class="cs-note">${esc(cs.note)}</div>` : ""}
+      <div class="row cs-actions"></div>
+      <div class="cs-ops"></div>`;
+    el.querySelector<HTMLElement>(".cs-head")!.onclick = () => { folded.set(cs.id, !isFolded); render(); };
+    const actions = el.querySelector<HTMLElement>(".cs-actions")!;
+    const button = (label: string, cls: string, title: string, fn: () => void) => {
+      const b = document.createElement("button");
+      b.textContent = label; b.className = cls; b.title = title;
+      b.onclick = (e) => { e.stopPropagation(); fn(); };
+      actions.append(b);
+    };
+    if (cs.pending) {
+      button("review", "", "step through this changeset slide by slide", () => { const first = pendingOps(cs.id)[0]; if (first) select(first); });
+      button(cs.pending > 1 ? `accept all ${cs.pending}` : "accept", "accept", "accept every pending change in this changeset", () => confirmBatch(cs, "accept"));
+    }
+    if (live) button(live > 1 ? "reject all" : "reject", "", "reject every pending change in this changeset", () => confirmBatch(cs, "reject"));
+    if (!actions.children.length) actions.remove();
+    const opsBox = el.querySelector<HTMLElement>(".cs-ops")!;
+    opsBox.replaceChildren(...ops.map(card));
+    if (!ops.length) opsBox.innerHTML = `<p class="empty">${cs.open ? "nothing proposed yet" : "no changes"}</p>`;
+    return el;
+  };
+
   /** Thumbnails are full-size players scaled to the card; size them once laid out. */
   const fitThumbs = () => {
     for (const th of opsEl.querySelectorAll<HTMLElement>(".thumb")) {
@@ -310,13 +383,23 @@ export function init(host: Host) {
     reviewBox.checked = state.review;
     const n = state.pending;
     for (const id of ["pcount", "pcount2"]) { const el = $(id); el.textContent = n ? String(n) : ""; el.hidden = !n; }
-    opsEl.replaceChildren(...state.ops.map(card));
-    if (!state.ops.length) opsEl.innerHTML = `<p class="empty">No proposals. ${state.review ? "Tool edits (MCP, the agent) will appear here for review." : "Review mode is off: tool edits apply directly."}</p>`;
+    const groups = state.changesets.map((cs) => group(cs, state!.ops.filter((o) => o.changeset === cs.id)));
+    // Ops whose changeset is gone should not happen (the server migrates old files), but never hide one.
+    const orphans = state.ops.filter((o) => !state!.changesets.some((c) => c.id === o.changeset));
+    if (orphans.length) groups.push(group({ id: -1, title: "", note: "", created: 0, open: false, ops: orphans.length, pending: orphans.filter((o) => o.status === "pending" && !o.stale).length, stale: orphans.filter((o) => o.stale).length, accepted: orphans.filter((o) => o.status === "accepted").length, rejected: orphans.filter((o) => o.status === "rejected").length }, orphans));
+    opsEl.replaceChildren(...groups);
+    if (!groups.length) opsEl.innerHTML = `<p class="empty">No proposals. ${state.review ? "Tool edits (MCP, the agent) will appear here for review." : "Review mode is off: tool edits apply directly."}</p>`;
     requestAnimationFrame(fitThumbs);
     if (!n && proposedShown) setProposed(false);
-    // The selected op may have been resolved: move on to the next pending one.
-    if (selected !== null && !current()?.stale && current()?.status === "pending") syncCompare();
-    else if (selected !== null) { selected = null; if (pendingOps().length) step(1); else syncCompare(); }
+    // The selected op may have been resolved: move on to the next pending one,
+    // in its changeset if it has any left, else anywhere.
+    const cur = current();
+    if (selected !== null && cur && !cur.stale && cur.status === "pending") syncCompare();
+    else if (selected !== null) {
+      const next = (cur && pendingOps(cur.changeset)[0]) ?? pendingOps()[0] ?? null;
+      selected = null;
+      if (next) select(next); else syncCompare();
+    }
   };
 
   return {

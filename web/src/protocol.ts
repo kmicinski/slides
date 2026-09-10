@@ -22,11 +22,29 @@ export interface OpView {
   proposed_slide: number | null;
   proposed_col: number;
   proposed_row: number;
+  /** The changeset this op belongs to. */
+  changeset: number;
+}
+/** A batch of ops reviewed together (src/review.rs `Changeset`), with its counts. */
+export interface ChangesetView {
+  id: number;
+  title: string;
+  note: string;
+  created: number;
+  /** Still taking writes from the tool that opened it. */
+  open: boolean;
+  ops: number;
+  /** Pending and mergeable. */
+  pending: number;
+  stale: number;
+  accepted: number;
+  rejected: number;
 }
 export interface AgentMsg { role: string; text: string; ts: number }
 export interface StateView {
   review: boolean;
   proposal: { id: string; created: number } | null;
+  changesets: ChangesetView[];
   ops: OpView[];
   pending: number;
   agent: { session: string | null; messages: AgentMsg[] };

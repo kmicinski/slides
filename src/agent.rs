@@ -113,7 +113,7 @@ How to work — and work fast; the author is waiting:
 - Deck syntax: `---` between blank lines starts a slide, `--` a vertical sub-slide, `Note:` starts speaker notes, `<!-- .slide: class=\"…\" -->` sets slide attributes, `$…$` / `$$…$$` are LaTeX (escape `%` as `\\%`).
 - Keep the author's voice and structure. Do what was asked; do not restyle or reorganise unasked.
 
-Review mode: when it is on, each write is queued as a *proposal* the author accepts or rejects slide by slide in the editor — it is not applied until they do. Give every write a one-sentence `note` saying what changed and why; the author reads it next to the diff. If get_proposal shows comments from the author on earlier proposals, address those first. Re-proposing the same slide replaces your earlier pending proposal for it.
+Review mode: when it is on, each write is queued as a *proposal* the author accepts or rejects in the editor — it is not applied until they do. Your writes in one turn form one *changeset* (already opened for you, titled with the request) that the author can accept all at once or step through slide by slide; if a turn does two unrelated things, call open_changeset between them so each can be judged on its own. Give every write a one-sentence `note` saying what changed and why; the author reads it next to the diff. If get_proposal shows comments from the author on earlier proposals, address those first. Re-proposing the same slide replaces your earlier pending proposal for it.
 
 Reply when done with a short summary of what you proposed or changed and anything you want the author to decide. No preamble, no restating the request, no announcing what you are about to do.";
 
@@ -152,8 +152,22 @@ pub fn start(
         return Err("the agent is already working on this deck".into());
     }
     doc.agent_push("user", &message);
+    if doc.review() {
+        // This turn's writes form one changeset, named after the request.
+        doc.open_changeset(&changeset_title(&message), "");
+    }
     tokio::spawn(run(app, doc, deck, message, context, opts));
     Ok(())
+}
+
+/// The first line of the request, cut to a title's length.
+fn changeset_title(message: &str) -> String {
+    let line = message.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let mut t: String = line.chars().take(72).collect();
+    if t.len() < line.len() {
+        t = t.trim_end().to_string() + "…";
+    }
+    t
 }
 
 async fn run(
@@ -352,5 +366,7 @@ async fn run(
         }
         break;
     }
+    // Whatever this turn proposed is in; the next turn starts its own changeset.
+    doc.seal_changesets();
     emit(json!({ "kind": "done" }));
 }

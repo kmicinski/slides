@@ -1,7 +1,14 @@
 //! Review mode: tool edits become *proposals* the author accepts or rejects
 //! slide by slide, instead of landing in the deck.
 //!
-//! A proposal is a list of per-slide operations. Each op remembers the slide
+//! A proposal is a list of per-slide operations grouped into *changesets*: one
+//! per batch of related edits (an Ask turn, or whatever a remote session put
+//! between `open_changeset` calls). The author can accept or reject a
+//! changeset in one go or step through its ops. A changeset is *open* while
+//! its tool is still adding to it; it seals when the author acts on it, when
+//! the tool opens the next one, or when the Ask run that made it ends.
+//!
+//! Each op remembers the slide
 //! it targets by an *anchor*: the slide's position when the op was made plus a
 //! hash of its source. Accepting an op finds the slide by that hash — so edits
 //! elsewhere in the deck don't invalidate it — and splices the change in with
@@ -71,6 +78,109 @@ pub struct Proposal {
     pub ops: Vec<Op>,
     #[serde(default)]
     pub next_op: u32,
+    #[serde(default)]
+    pub changesets: Vec<Changeset>,
+    #[serde(default)]
+    pub next_changeset: u32,
+}
+
+impl Proposal {
+    fn new() -> Self {
+        Proposal {
+            id: format!("{:x}", now()),
+            created: now(),
+            ops: Vec::new(),
+            next_op: 1,
+            changesets: Vec::new(),
+            next_changeset: 1,
+        }
+    }
+
+    /// Nothing left for the author to do: every op resolved, no changeset open.
+    fn done(&self) -> bool {
+        self.ops.iter().all(|o| o.status != Status::Pending)
+            && self.changesets.iter().all(|c| c.sealed)
+    }
+
+    /// The changeset new ops join, if a tool left one open.
+    fn open(&self) -> Option<u32> {
+        self.changesets.iter().rev().find(|c| !c.sealed).map(|c| c.id)
+    }
+
+    /// Seals every open changeset; an open one nothing was written into is dropped.
+    fn seal_all(&mut self) {
+        for c in &mut self.changesets {
+            c.sealed = true;
+        }
+        self.prune();
+    }
+
+    /// Seals one changeset (the author touched it, or the tool moved on).
+    fn seal(&mut self, id: u32) {
+        if let Some(c) = self.changesets.iter_mut().find(|c| c.id == id) {
+            c.sealed = true;
+        }
+        self.prune();
+    }
+
+    /// Drops sealed changesets with no ops left.
+    fn prune(&mut self) {
+        let ops = &self.ops;
+        self.changesets
+            .retain(|c| !c.sealed || ops.iter().any(|o| o.changeset == c.id));
+    }
+
+    fn add_changeset(&mut self, title: String, note: String) -> u32 {
+        self.seal_all();
+        let id = self.next_changeset;
+        self.next_changeset += 1;
+        self.changesets.push(Changeset {
+            id,
+            title,
+            note,
+            created: now(),
+            sealed: false,
+        });
+        id
+    }
+
+    /// Files older than changesets: every op is in changeset 0, which does not
+    /// exist. Give such ops a sealed changeset so the view has a group for them.
+    fn migrate(&mut self) {
+        let orphans: Vec<u32> = self
+            .ops
+            .iter()
+            .map(|o| o.changeset)
+            .filter(|id| !self.changesets.iter().any(|c| c.id == *id))
+            .collect();
+        for id in orphans {
+            if !self.changesets.iter().any(|c| c.id == id) {
+                self.changesets.push(Changeset {
+                    id,
+                    title: String::new(),
+                    note: String::new(),
+                    created: self.created,
+                    sealed: true,
+                });
+            }
+        }
+        let max = self.changesets.iter().map(|c| c.id).max().unwrap_or(0);
+        self.next_changeset = self.next_changeset.max(max + 1);
+    }
+}
+
+/// A batch of ops reviewed together.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Changeset {
+    pub id: u32,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub note: String,
+    pub created: u64,
+    /// Sealed: no tool adds to it any more (see the module doc).
+    #[serde(default)]
+    pub sealed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -90,6 +200,9 @@ pub struct Op {
     pub status: Status,
     #[serde(default)]
     pub comment: String,
+    /// The changeset this op belongs to.
+    #[serde(default)]
+    pub changeset: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -153,6 +266,27 @@ pub fn locate(text: &str, anchor: &Anchor) -> Option<usize> {
     (0..srcs.len()).find(|&i| at(i)).map(|i| i + 1)
 }
 
+/// `locate`, but following the proposal's own rewrites of the anchored slide:
+/// an op made against slide N still finds N after another op (not `skip`,
+/// the op itself) replaced it — in the staged fork, or once that replace was
+/// accepted. So "rewrite 2, then add slides after 2" holds together as a batch.
+fn locate_through(text: &str, anchor: &Anchor, prior: &[Op], skip: u32) -> Option<usize> {
+    let mut a = *anchor;
+    for _ in 0..8 {
+        if let Some(pos) = locate(text, &a) {
+            return Some(pos);
+        }
+        let rewrite = prior.iter().find(|o| {
+            o.id != skip
+                && o.kind == Kind::Replace
+                && o.status != Status::Rejected
+                && o.anchor.map(|x| x.hash) == Some(a.hash)
+        })?;
+        a.hash = fnv1a(rewrite.source.trim_matches('\n'));
+    }
+    None
+}
+
 /// Where an insert lands. Several inserts "after slide N" chain in proposal
 /// order — each goes after the previous one's slide, if that slide is in
 /// `text` (pending, in the staged text; accepted, in the real one) — so a tool
@@ -161,7 +295,7 @@ fn insert_after(text: &str, op: &Op, prior: &[Op]) -> Result<usize, String> {
     let Some(anchor) = &op.anchor else {
         return Ok(0);
     };
-    let base = locate(text, anchor).ok_or("the slide it follows was edited")?;
+    let base = locate_through(text, anchor, prior, op.id).ok_or("the slide it follows was edited")?;
     let chained = prior
         .iter()
         .filter(|o| {
@@ -199,7 +333,8 @@ pub fn apply(text: &str, op: &Op, prior: &[Op]) -> Result<String, String> {
         }
         Kind::Replace | Kind::Delete => {
             let a = op.anchor.as_ref().ok_or("op has no anchor")?;
-            let slide = locate(text, a).ok_or("the slide was edited since this was proposed")?;
+            let slide = locate_through(text, a, prior, op.id)
+                .ok_or("the slide was edited since this was proposed")?;
             if op.kind == Kind::Replace {
                 replace_slide(text, slide, &op.source)
             } else {
@@ -223,7 +358,7 @@ pub fn proposed_text(text: &str, ops: &[Op]) -> String {
 /// Where a pending op's result sits in the proposed deck (1-based), to point
 /// the preview and thumbnails at it. A delete points at the slide that now
 /// occupies its place.
-pub fn proposed_position(op: &Op, text: &str, proposed: &str, stale: bool) -> Option<usize> {
+pub fn proposed_position(op: &Op, ops: &[Op], text: &str, proposed: &str, stale: bool) -> Option<usize> {
     if op.status != Status::Pending || stale {
         return None;
     }
@@ -234,7 +369,7 @@ pub fn proposed_position(op: &Op, text: &str, proposed: &str, stale: bool) -> Op
             prop_srcs.iter().position(|s| fnv1a(s) == h).map(|i| i + 1)
         }
         Kind::Delete => {
-            let at = locate(text, op.anchor.as_ref()?)?;
+            let at = locate_through(text, op.anchor.as_ref()?, ops, op.id)?;
             Some(at.min(prop_srcs.len()).max(1))
         }
         Kind::Deck => Some(1),
@@ -247,7 +382,7 @@ pub fn mark_proposed(deck: &mut crate::deck::Deck, text: &str, proposed: &str, o
     let prop = regions(proposed);
     for op in ops {
         let stale = op.status == Status::Pending && apply(text, op, ops).is_err();
-        let Some(pos) = proposed_position(op, text, proposed, stale) else {
+        let Some(pos) = proposed_position(op, ops, text, proposed, stale) else {
             continue;
         };
         let Some(r) = prop.get(pos - 1) else { continue };
@@ -272,30 +407,27 @@ pub fn mark_proposed(deck: &mut crate::deck::Deck, text: &str, proposed: &str, o
 pub fn view(text: &str, state: &DeckState, proposed: &str) -> Value {
     let cur = regions(text);
     let prop = regions(proposed);
-    let ops: Vec<Value> = state
+    let all = state
         .proposal
         .as_ref()
         .map(|p| p.ops.as_slice())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let ops: Vec<Value> = all
         .iter()
         .map(|op| {
             let slide = match (&op.kind, &op.anchor) {
                 (Kind::Deck, _) | (_, None) => None,
-                (_, Some(a)) => locate(text, a).or_else(|| {
+                (_, Some(a)) => locate_through(text, a, all, op.id).or_else(|| {
                     // Resolved ops keep the position they were made at, for the record.
                     (op.status != Status::Pending).then_some(a.slide)
                 }),
             };
-            let stale = op.status == Status::Pending
-                && match op.kind {
-                    Kind::Deck => op.anchor.map(|a| a.hash) != Some(fnv1a(text)),
-                    Kind::Insert => op.anchor.is_some() && slide.is_none(),
-                    _ => slide.is_none(),
-                };
+            // Stale = accepting it now would fail (the same check `accept` makes).
+            let stale = op.status == Status::Pending && apply(text, op, all).is_err();
             let current = slide
                 .and_then(|s| cur.get(s - 1))
                 .map(|r| text[r.start..r.end].trim_matches('\n'));
-            let proposed_slide = proposed_position(op, text, proposed, stale);
+            let proposed_slide = proposed_position(op, all, text, proposed, stale);
             let (pcol, prow) = proposed_slide
                 .and_then(|s| prop.get(s - 1))
                 .map(|r| (r.column, r.row))
@@ -315,13 +447,38 @@ pub fn view(text: &str, state: &DeckState, proposed: &str) -> Value {
                 "proposed_slide": proposed_slide,
                 "proposed_col": pcol,
                 "proposed_row": prow,
+                "changeset": op.changeset,
             })
         })
         .collect();
     let pending = ops.iter().filter(|o| o["status"] == "pending").count();
+    let changesets: Vec<Value> = state
+        .proposal
+        .as_ref()
+        .map(|p| p.changesets.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|c| {
+            let mine = || ops.iter().filter(|o| o["changeset"] == c.id);
+            let count = |f: &dyn Fn(&Value) -> bool| mine().filter(|o| f(o)).count();
+            json!({
+                "id": c.id,
+                "title": c.title,
+                "note": c.note,
+                "created": c.created,
+                "open": !c.sealed,
+                "ops": count(&|_| true),
+                "pending": count(&|o| o["status"] == "pending" && o["stale"] == false),
+                "stale": count(&|o| o["stale"] == true),
+                "accepted": count(&|o| o["status"] == "accepted"),
+                "rejected": count(&|o| o["status"] == "rejected"),
+            })
+        })
+        .collect();
     json!({
         "review": state.review,
         "proposal": state.proposal.as_ref().map(|p| json!({ "id": p.id, "created": p.created })),
+        "changesets": changesets,
         "ops": ops,
         "pending": pending,
         "agent": {
@@ -335,10 +492,14 @@ pub fn view(text: &str, state: &DeckState, proposed: &str) -> Value {
 // Persistence
 
 pub fn load(dir: &Path) -> DeckState {
-    fs::read_to_string(dir.join(".slides.json"))
+    let mut state: DeckState = fs::read_to_string(dir.join(".slides.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(p) = state.proposal.as_mut() {
+        p.migrate();
+    }
+    state
 }
 
 pub fn save(dir: &Path, state: &DeckState) -> io::Result<()> {
@@ -354,6 +515,14 @@ pub enum Action {
     Accept,
     Reject,
     Comment(String),
+    Withdraw,
+}
+
+/// What the author can do to a whole changeset.
+pub enum BatchAction {
+    /// Accept every pending op, in order; stale ones are skipped and reported.
+    Accept,
+    Reject,
     Withdraw,
 }
 
@@ -413,22 +582,15 @@ impl Doc {
             note: String::new(),
             status: Status::Pending,
             comment: String::new(),
+            changeset: 0,
         };
         apply(&staged, &probe, g.ops()).or_else(|_| apply(&g.text, &probe, g.ops()))?;
-        let all_resolved = g
-            .state
-            .proposal
-            .as_ref()
-            .is_some_and(|p| p.ops.iter().all(|o| o.status != Status::Pending));
-        if g.state.proposal.is_none() || all_resolved {
-            g.state.proposal = Some(Proposal {
-                id: format!("{:x}", now()),
-                created: now(),
-                ops: Vec::new(),
-                next_op: 1,
-            });
-        }
-        let p = g.state.proposal.as_mut().unwrap();
+        let p = Self::proposal_mut(&mut g);
+        // Writes join the open changeset; without one, each fresh batch gets an untitled one.
+        let cs = match p.open() {
+            Some(id) => id,
+            None => p.add_changeset(String::new(), String::new()),
+        };
         // A pending op on the same slide is *replaced* by a new one — except
         // inserts, which may legitimately stack after the same slide: those
         // only replace an earlier insert that starts with the same line.
@@ -453,6 +615,8 @@ impl Doc {
                 o.note = note;
                 o.vertical = vertical;
                 o.comment.clear();
+                // The latest batch owns it now (its old changeset may empty out).
+                o.changeset = cs;
                 o.id
             }
             None => {
@@ -467,10 +631,12 @@ impl Doc {
                     note,
                     status: Status::Pending,
                     comment: String::new(),
+                    changeset: cs,
                 });
                 id
             }
         };
+        p.prune();
         self.after_review_change(&mut g);
         let v = self.view_locked(&g);
         Ok(v["ops"]
@@ -502,11 +668,99 @@ impl Doc {
             Action::Reject => p.ops[i].status = Status::Rejected,
             Action::Comment(c) => p.ops[i].comment = c,
             Action::Withdraw => {
-                p.ops.remove(i);
+                let cs = p.ops.remove(i).changeset;
+                p.seal(cs);
+                self.after_review_change(&mut g);
+                return Ok(());
             }
         }
+        // The author is on this batch now: it stops taking new ops.
+        let p = g.state.proposal.as_mut().unwrap();
+        let cs = p.ops[i].changeset;
+        p.seal(cs);
         self.after_review_change(&mut g);
         Ok(())
+    }
+
+    /// Opens a changeset for the writes that follow (sealing any open one).
+    pub fn open_changeset(&self, title: &str, note: &str) -> u32 {
+        let mut g = self.lock();
+        let id = Self::proposal_mut(&mut g).add_changeset(title.trim().into(), note.trim().into());
+        self.after_review_change(&mut g);
+        id
+    }
+
+    /// Seals every open changeset: the tool that was writing has finished.
+    pub fn seal_changesets(&self) {
+        let mut g = self.lock();
+        if let Some(p) = g.state.proposal.as_mut() {
+            if p.open().is_none() {
+                return;
+            }
+            p.seal_all();
+        }
+        self.after_review_change(&mut g);
+    }
+
+    /// Accepts, rejects or withdraws every pending op of one changeset.
+    /// Accepting applies them in order and commits once; ops that went stale
+    /// (or that the earlier ones made unmergeable) stay pending and are
+    /// reported. Returns `{accepted|rejected|withdrawn: [ids], skipped: [{op, why}]}`.
+    pub fn resolve_changeset(&self, id: u32, action: BatchAction) -> Result<Value, String> {
+        let mut g = self.lock();
+        let mine: Vec<usize> = {
+            let p = g.state.proposal.as_ref().ok_or("no open proposal")?;
+            if !p.changesets.iter().any(|c| c.id == id) {
+                return Err("no such changeset".into());
+            }
+            (0..p.ops.len())
+                .filter(|&i| p.ops[i].changeset == id && p.ops[i].status == Status::Pending)
+                .collect()
+        };
+        let mut done = Vec::new();
+        let mut skipped = Vec::new();
+        let result = match action {
+            BatchAction::Accept => {
+                let mut text = g.text.clone();
+                let p = g.state.proposal.as_mut().unwrap();
+                for i in mine {
+                    let op = p.ops[i].clone();
+                    match apply(&text, &op, &p.ops) {
+                        Ok(next) => {
+                            text = next;
+                            p.ops[i].status = Status::Accepted;
+                            done.push(op.id);
+                        }
+                        Err(why) => skipped.push(json!({ "op": op.id, "why": why })),
+                    }
+                }
+                if !done.is_empty() {
+                    g.text = text;
+                    let change = crate::live::Change::Text(g.text.as_str().into());
+                    self.commit(&mut g, change, 0);
+                }
+                json!({ "accepted": done, "skipped": skipped })
+            }
+            BatchAction::Reject => {
+                let p = g.state.proposal.as_mut().unwrap();
+                for i in mine {
+                    p.ops[i].status = Status::Rejected;
+                    done.push(p.ops[i].id);
+                }
+                json!({ "rejected": done, "skipped": skipped })
+            }
+            BatchAction::Withdraw => {
+                let p = g.state.proposal.as_mut().unwrap();
+                for i in mine.iter().rev() {
+                    done.push(p.ops.remove(*i).id);
+                }
+                done.reverse();
+                json!({ "withdrawn": done, "skipped": skipped })
+            }
+        };
+        g.state.proposal.as_mut().unwrap().seal(id);
+        self.after_review_change(&mut g);
+        Ok(result)
     }
 
     /// Drops resolved ops (and the proposal when nothing is left).
@@ -514,11 +768,21 @@ impl Doc {
         let mut g = self.lock();
         if let Some(p) = g.state.proposal.as_mut() {
             p.ops.retain(|o| o.status == Status::Pending);
-            if p.ops.is_empty() {
+            p.prune();
+            if p.ops.is_empty() && p.changesets.is_empty() {
                 g.state.proposal = None;
             }
         }
         self.after_review_change(&mut g);
+    }
+
+    /// The proposal to add to: the current one, or a fresh one once the
+    /// author has resolved everything in it (its history is dropped then).
+    fn proposal_mut(g: &mut Inner) -> &mut Proposal {
+        if g.state.proposal.as_ref().is_none_or(|p| p.done()) {
+            g.state.proposal = Some(Proposal::new());
+        }
+        g.state.proposal.as_mut().unwrap()
     }
 
     /// Waits until the proposal changes (accept/reject/comment/…), or `timeout`.
@@ -620,6 +884,7 @@ mod tests {
             note: String::new(),
             status: Status::Pending,
             comment: String::new(),
+            changeset: 1,
         }
     }
 
@@ -692,6 +957,129 @@ mod tests {
         assert_eq!(sources(&t), vec!["# A", "# X", "# Y", "# B", "# C"]);
     }
 
+    fn temp_doc(tag: &str) -> Doc {
+        let dir = std::env::temp_dir().join(format!("slides-review-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("themes/t")).unwrap();
+        fs::write(dir.join("themes/t/theme.toml"), "[reveal]\n").unwrap();
+        Doc::create(&dir, "d", DECK).unwrap()
+    }
+
+    #[tokio::test]
+    async fn writes_join_the_open_changeset_and_seal_on_review() {
+        let doc = temp_doc("group");
+        // No changeset open: the first write opens an untitled one, the next joins it.
+        doc.propose(Kind::Replace, Some(1), false, "# A1".into(), "".into()).unwrap();
+        doc.propose(Kind::Replace, Some(2), false, "# B1".into(), "".into()).unwrap();
+        let v = doc.state_view();
+        assert_eq!(v["changesets"].as_array().unwrap().len(), 1);
+        assert_eq!(v["changesets"][0]["title"], "");
+        assert_eq!(v["changesets"][0]["open"], true);
+        assert_eq!(v["changesets"][0]["pending"], 2);
+        // A named changeset seals the untitled one and takes the writes that follow.
+        let cs = doc.open_changeset("Add a summary", "one slide at the end");
+        doc.propose(Kind::Insert, Some(3), false, "# D".into(), "".into()).unwrap();
+        let v = doc.state_view();
+        assert_eq!(v["changesets"].as_array().unwrap().len(), 2);
+        assert_eq!(v["changesets"][0]["open"], false);
+        assert_eq!(v["changesets"][1]["id"], cs);
+        assert_eq!(v["changesets"][1]["title"], "Add a summary");
+        assert_eq!(v["ops"][2]["changeset"], cs);
+        // The author acting on a changeset seals it; the next write starts a new one.
+        doc.seal_changesets();
+        assert_eq!(doc.state_view()["changesets"][1]["open"], false);
+        doc.resolve(1, Action::Reject).unwrap();
+        doc.propose(Kind::Delete, Some(3), false, String::new(), "".into()).unwrap();
+        let v = doc.state_view();
+        assert_eq!(v["changesets"].as_array().unwrap().len(), 3);
+        assert_eq!(v["changesets"][2]["open"], true);
+        // Re-proposing a pending slide moves it into the current changeset.
+        doc.propose(Kind::Replace, Some(2), false, "# B2".into(), "".into()).unwrap();
+        let v = doc.state_view();
+        let b = v["ops"].as_array().unwrap().iter().find(|o| o["source"] == "# B2").unwrap();
+        assert_eq!(b["id"], 2, "replaced in place, same op id");
+        assert_eq!(b["changeset"], v["changesets"][2]["id"]);
+        // An open changeset nobody wrote into disappears when sealed.
+        doc.open_changeset("nothing", "");
+        assert_eq!(doc.state_view()["changesets"].as_array().unwrap().len(), 4);
+        doc.seal_changesets();
+        assert_eq!(doc.state_view()["changesets"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn accept_all_applies_in_order_and_reports_stale_ops() {
+        let doc = temp_doc("batch");
+        let cs = doc.open_changeset("Batch", "");
+        doc.propose(Kind::Replace, Some(1), false, "# A1".into(), "".into()).unwrap();
+        doc.propose(Kind::Insert, Some(3), false, "# D".into(), "".into()).unwrap();
+        doc.propose(Kind::Insert, Some(3), false, "# E".into(), "".into()).unwrap();
+        doc.propose(Kind::Delete, Some(2), false, String::new(), "".into()).unwrap();
+        // The author edits slide 2 under the delete: that op goes stale.
+        doc.replace(DECK.replace("# B", "# B edited"), 0);
+        let r = doc.resolve_changeset(cs, BatchAction::Accept).unwrap();
+        assert_eq!(r["accepted"], json!([1, 2, 3]));
+        assert_eq!(r["skipped"][0]["op"], 4);
+        assert_eq!(
+            sources(&doc.text()),
+            vec!["# A1", "# B edited", "# C", "# D", "# E"]
+        );
+        let v = doc.state_view();
+        assert_eq!(v["changesets"][0]["accepted"], 3);
+        assert_eq!(v["changesets"][0]["stale"], 1);
+        assert_eq!(v["changesets"][0]["open"], false);
+        // Reject all clears the stale one too.
+        doc.resolve_changeset(cs, BatchAction::Reject).unwrap();
+        assert_eq!(doc.state_view()["pending"], 0);
+        // Everything resolved and nothing open: the next write starts a fresh proposal.
+        doc.propose(Kind::Replace, Some(1), false, "# A2".into(), "".into()).unwrap();
+        let v = doc.state_view();
+        assert_eq!(v["ops"].as_array().unwrap().len(), 1);
+        assert_eq!(v["changesets"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn inserts_follow_a_rewrite_of_their_anchor() {
+        let doc = temp_doc("through");
+        let cs = doc.open_changeset("Rewrite B and expand it", "");
+        doc.propose(Kind::Replace, Some(2), false, "# B1".into(), "".into()).unwrap();
+        doc.propose(Kind::Insert, Some(2), false, "# B-more".into(), "".into()).unwrap();
+        doc.propose(Kind::Insert, Some(2), true, "# B-detail".into(), "".into()).unwrap();
+        let v = doc.state_view();
+        assert!(v["ops"].as_array().unwrap().iter().all(|o| o["stale"] == false));
+        assert_eq!(v["ops"][1]["slide"], 2);
+        assert_eq!(v["ops"][1]["proposed_slide"], 3, "staged fork has the insert after the rewrite");
+        assert_eq!(v["ops"][2]["proposed_slide"], 4);
+        let r = doc.resolve_changeset(cs, BatchAction::Accept).unwrap();
+        assert_eq!(r["accepted"], json!([1, 2, 3]));
+        assert_eq!(r["skipped"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            sources(&doc.text()),
+            vec!["# A", "# B1", "# B-more", "# B-detail", "# C"]
+        );
+        // One at a time works too: the accepted rewrite still resolves the anchor.
+        let doc = temp_doc("through2");
+        doc.propose(Kind::Replace, Some(2), false, "# B1".into(), "".into()).unwrap();
+        doc.propose(Kind::Insert, Some(2), false, "# B-more".into(), "".into()).unwrap();
+        doc.resolve(1, Action::Accept).unwrap();
+        assert_eq!(doc.state_view()["ops"][1]["stale"], false);
+        doc.resolve(2, Action::Accept).unwrap();
+        assert_eq!(sources(&doc.text()), vec!["# A", "# B1", "# B-more", "# C"]);
+    }
+
+    #[test]
+    fn old_state_files_get_a_changeset() {
+        let old = r##"{"review":true,"proposal":{"id":"p","created":5,"next_op":2,
+            "ops":[{"id":1,"kind":"replace","anchor":{"slide":1,"hash":1},"source":"# X"}]}}"##;
+        let mut state: DeckState = serde_json::from_str(old).unwrap();
+        state.proposal.as_mut().unwrap().migrate();
+        let p = state.proposal.as_ref().unwrap();
+        assert_eq!(p.ops[0].changeset, 0);
+        assert_eq!(p.changesets.len(), 1);
+        assert_eq!(p.changesets[0].id, 0);
+        assert!(p.changesets[0].sealed);
+        assert_eq!(p.next_changeset, 1);
+    }
+
     #[test]
     fn view_reports_positions_and_staleness() {
         let mut state = DeckState::default();
@@ -706,10 +1094,23 @@ mod tests {
                 },
             ],
             next_op: 3,
+            changesets: vec![Changeset {
+                id: 1,
+                title: "batch".into(),
+                note: String::new(),
+                created: 0,
+                sealed: true,
+            }],
+            next_changeset: 2,
         });
         let proposed = proposed_text(DECK, &state.proposal.as_ref().unwrap().ops);
         let v = view(DECK, &state, &proposed);
         assert_eq!(v["pending"], 2);
+        assert_eq!(v["changesets"][0]["title"], "batch");
+        assert_eq!(v["changesets"][0]["ops"], 2);
+        assert_eq!(v["changesets"][0]["pending"], 1);
+        assert_eq!(v["changesets"][0]["stale"], 1);
+        assert_eq!(v["ops"][0]["changeset"], 1);
         assert_eq!(v["ops"][0]["slide"], 2);
         assert_eq!(v["ops"][0]["stale"], false);
         assert_eq!(v["ops"][0]["proposed_slide"], 2);

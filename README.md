@@ -148,7 +148,8 @@ through untouched. Tools (`src/mcp.rs`):
 | `replace_slide` / `insert_slide` / `delete_slide` | edit one slide by position; separators are managed for you |
 | `list_themes` / `get_theme` | themes and their schemas with examples — the vocabulary |
 | `get_schema` / `put_schema` | one schema's CSS + example; write to add a slide design |
-| `get_proposal` / `await_review` / `withdraw_proposal` | review mode: see each op's status and the author's comments, wait for a decision, take an op back |
+| `open_changeset` | review mode: group the writes that follow under a title the author can accept or reject in one go |
+| `get_proposal` / `await_review` / `withdraw_proposal` | review mode: see each changeset and op's status and the author's comments, wait for a decision, take an op or a changeset back |
 
 Slides are addressed by their 1-based position in presentation order (the
 "n of m" the player shows). Slide edits are spliced into the source under the
@@ -172,20 +173,30 @@ edits* switch in the editor header (on by default; `src/review.rs`):
   **and** a hash of that slide's source, so edits elsewhere in the deck leave it
   valid, while editing the targeted slide makes it *stale* (reject or
   re-propose; never merged).
+- Operations are grouped into **changesets** — one batch of related edits.
+  Each ✦ Ask turn is a changeset titled with the request; a remote session
+  calls `open_changeset` before a batch (writes made without one land in an
+  untitled changeset). A changeset is *open* while its tool is still writing
+  and seals when the author acts on it, when the tool opens the next one, or
+  when the Ask run ends. The author can **accept all** or **reject all** from
+  the changeset's header, or **review** it slide by slide. Accepting all
+  applies the ops in order and commits once; any that went stale stay pending
+  and are reported.
 - A proposal is reviewed as a **fork of the deck**, not as text. The editor's
-  **Review** tab lists the operations as cards with the tool's `note` and a
-  rendered thumbnail of the proposed slide (`/deck/<name>/thumb`, a
-  chrome-less one-slide player); the line diff is there too, folded away.
+  **Review** tab lists each changeset's operations as cards with the tool's
+  `note` and a rendered thumbnail of the proposed slide (`/deck/<name>/thumb`,
+  a chrome-less one-slide player); the line diff is there too, folded away.
   Selecting a card puts the preview into **compare** mode: the current deck
   above and the proposed deck below, both parked on that slide, with prev /
-  next / accept / reject / comment in a bar (keys `n` `p` `a` `r` `c`, `esc`
-  to leave). The lower player is the whole forked deck — arrow around it; its
+  next (within the changeset) / accept / accept all / reject / comment in a
+  bar (keys `n` `p` `a` `A` `r` `c`, `esc` to leave). The lower player is the whole forked deck — arrow around it; its
   added and changed slides carry a dashed outline and a "proposed" badge
   (`data-proposed` on the section, set only on the live proposed rendering).
   A deletion shows as a red overlay on the current slide. "Show proposed deck
   in the preview" browses the fork in the single preview instead.
   Comments are for the agent: `get_proposal` returns them, `await_review`
-  blocks until the author acts, `withdraw_proposal` takes an op back.
+  blocks until the author acts, `withdraw_proposal` takes an op or a whole
+  changeset back.
 - Accepting splices the change through the same code the direct tools use;
   nothing else in the proposal moves. State lives in `decks/<name>/.slides.json`.
 

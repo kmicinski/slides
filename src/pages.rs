@@ -98,10 +98,10 @@ pub async fn editor(
 <main>
 <div id="editor"></div><div id="divider"></div>
 <div id="preview-pane">
-  <div id="compare-bar" hidden title="keys: n / p next and previous · a accept · r reject · c comment · esc close">
+  <div id="compare-bar" hidden title="keys: n / p next and previous · a accept · A accept the whole changeset · r reject · c comment · esc close">
     <button id="cmp-prev" title="previous (p)">◀</button><span id="cmp-pos" class="pos"></span><button id="cmp-next" title="next (n)">▶</button>
     <span id="cmp-title" class="title"></span><span class="spacer"></span>
-    <button id="cmp-accept" class="accept" title="accept (a)">accept</button><button id="cmp-reject" title="reject (r)">reject</button><button id="cmp-comment" title="comment (c)">comment</button><button id="cmp-close" title="back to the single preview (esc)">×</button>
+    <button id="cmp-accept" class="accept" title="accept this slide (a)">accept</button><button id="cmp-accept-all" class="accept" title="accept every pending slide in this changeset (A)">accept all</button><button id="cmp-reject" title="reject (r)">reject</button><button id="cmp-comment" title="comment (c)">comment</button><button id="cmp-close" title="back to the single preview (esc)">×</button>
   </div>
   <div id="panes">
     <div class="pane" id="pane-current"><div class="pane-label" id="label-current" hidden>current</div><iframe id="preview" src="/deck/{name}/live"></iframe><div id="delete-overlay" hidden>removed in this proposal</div></div>

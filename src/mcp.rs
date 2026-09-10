@@ -18,6 +18,8 @@
 //! deck: each call queues a proposal the author accepts or rejects in the
 //! editor. The reply says so (`proposed: true`), `get_proposal` reports each
 //! op's status and the author's comments, and `await_review` waits for them.
+//! Writes are grouped into *changesets* the author can accept or reject as a
+//! whole: `open_changeset` starts a named one for the writes that follow.
 
 use crate::deck::{self, Deck, Diagnostic, Renderer};
 use crate::review::Kind;
@@ -216,8 +218,13 @@ fn tool_catalog() -> Vec<Value> {
             "inputSchema": obj(json!({ "deck": deck, "slide": slide, "note": note }), &["deck", "slide"])
         }),
         json!({
+            "name": "open_changeset",
+            "description": "Start a changeset: the writes that follow (replace/insert/delete/put_deck) are grouped under this title, and the author can accept or reject the whole group at once or step through it slide by slide. Call it before a batch of related edits (one per task, not per slide); writes made without one land in an untitled changeset. The changeset closes when you open the next one or the author acts on it.",
+            "inputSchema": obj(json!({ "deck": deck, "title": { "type": "string", "description": "A few words naming the batch, e.g. \"Tighten the intro\"." }, "note": { "type": "string", "description": "Optional sentence for the author about the batch as a whole." } }), &["deck", "title"])
+        }),
+        json!({
             "name": "get_proposal",
-            "description": "Review state of a deck: whether review mode is on, and every proposed op with its status (pending / accepted / rejected), whether it went stale (the author edited that slide), and the author's comment asking for changes. Check this before revising work the author has commented on.",
+            "description": "Review state of a deck: whether review mode is on, its changesets (title, open, counts), and every proposed op with its changeset, status (pending / accepted / rejected), whether it went stale (the author edited that slide), and the author's comment asking for changes. Check this before revising work the author has commented on.",
             "inputSchema": obj(json!({ "deck": deck }), &["deck"])
         }),
         json!({
@@ -227,8 +234,8 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "withdraw_proposal",
-            "description": "Withdraw one pending op (`op`), or every pending op of the deck's proposal when `op` is omitted.",
-            "inputSchema": obj(json!({ "deck": deck, "op": { "type": "integer" } }), &["deck"])
+            "description": "Withdraw one pending op (`op`), every pending op of one changeset (`changeset`), or every pending op of the deck's proposal when both are omitted.",
+            "inputSchema": obj(json!({ "deck": deck, "op": { "type": "integer" }, "changeset": { "type": "integer" } }), &["deck"])
         }),
         json!({
             "name": "list_themes",
@@ -414,7 +421,7 @@ fn proposed(doc: &crate::live::Doc, op: Value) -> Value {
         .unwrap_or_default();
     json!({
         "proposed": true,
-        "message": "review mode: queued for the author to accept or reject in the editor; nothing changed yet. Slide positions keep referring to the current deck — to add several slides in a row, insert each one after the same slide, in order.",
+        "message": "review mode: queued in the current changeset for the author to accept or reject in the editor; nothing changed yet. Slide positions keep referring to the current deck — to add several slides in a row, insert each one after the same slide, in order.",
         "op": op,
         "diagnostics": diagnostics,
     })
@@ -574,9 +581,26 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
                 .await_review(std::time::Duration::from_secs(secs))
                 .await)
         }
+        "open_changeset" => {
+            let a: DeckArg = parse(&args)?;
+            let d = doc(app, &a.deck)?;
+            let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("");
+            if title.trim().is_empty() {
+                return Err("missing 'title'".into());
+            }
+            if !d.review() {
+                return Ok(json!({ "changeset": Value::Null, "message": "review mode is off: writes apply directly, there is nothing to group" }));
+            }
+            let id = d.open_changeset(title, note);
+            Ok(json!({ "changeset": id, "message": "open: writes to this deck now join this changeset" }))
+        }
         "withdraw_proposal" => {
             let a: DeckArg = parse(&args)?;
             let d = doc(app, &a.deck)?;
+            if let Some(cs) = args.get("changeset").and_then(|v| v.as_u64()) {
+                return d.resolve_changeset(cs as u32, crate::review::BatchAction::Withdraw);
+            }
             let ids: Vec<u32> = match args.get("op").and_then(|v| v.as_u64()) {
                 Some(id) => vec![id as u32],
                 None => d.state_view()["ops"]
