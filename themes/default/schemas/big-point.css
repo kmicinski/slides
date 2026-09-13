@@ -1,0 +1,16 @@
+/* ---------- Big point slides ---------- */
+
+.reveal section.big-point {
+  text-align: center;
+}
+
+.reveal section.big-point h1 {
+  font-size: 2.6em;
+  color: var(--accent);
+}
+
+.reveal section.big-point p {
+  font-size: 1.2em;
+  color: var(--heading);
+}
+

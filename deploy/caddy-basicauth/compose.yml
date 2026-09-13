@@ -1,0 +1,35 @@
+# Proxy-auth mode with Caddy's basic_auth: Caddy asks for a user/password on
+# the editing routes and forwards the user name as Remote-User.
+services:
+  slides:
+    build:
+      context: ../..
+      args:
+        CLAUDE_CLI: ${CLAUDE_CLI:-0}
+    environment:
+      - TRUST_PROXY_AUTH=true
+      - SLIDES_MCP_TOKEN=${SLIDES_MCP_TOKEN:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - SLIDES_AGENT_MODEL=${SLIDES_AGENT_MODEL:-claude-opus-5}
+    volumes:
+      - ./decks:/app/decks
+      - ../../themes:/app/themes
+      - slides_home:/home/slides
+    expose: ["7100"]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    environment:
+      - SLIDES_HOST=${SLIDES_HOST:?set SLIDES_HOST in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  slides_home:
+  caddy_data:
+  caddy_config:

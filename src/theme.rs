@@ -72,14 +72,11 @@ impl Theme {
         })
     }
 
-    /// The named theme, or the first theme when a deck names none.
+    /// The named theme, or the default theme when a deck names none.
     pub fn resolve(root: &Path, name: Option<&str>) -> Result<Theme> {
         match name {
             Some(name) => Theme::load(&root.join("themes").join(name)),
-            None => list(root)?
-                .into_iter()
-                .next()
-                .context("no themes installed"),
+            None => default(root),
         }
     }
 
@@ -87,6 +84,23 @@ impl Theme {
         fs::read_to_string(self.dir.join("starter.md"))
             .with_context(|| format!("theme {}: starter.md", self.name))
     }
+}
+
+/// The theme a deck gets when it names none, and the one the new-deck form
+/// preselects: `SLIDES_DEFAULT_THEME` if set, else the theme called `default`
+/// if installed, else the first by name.
+pub fn default(root: &Path) -> Result<Theme> {
+    let themes = list(root)?;
+    let want = std::env::var("SLIDES_DEFAULT_THEME")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "default".into());
+    let mut themes = themes.into_iter();
+    let first = themes.next().context("no themes installed")?;
+    if first.name == want {
+        return Ok(first);
+    }
+    Ok(themes.find(|t| t.name == want).unwrap_or(first))
 }
 
 /// Every theme under `root/themes`, by name.

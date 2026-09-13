@@ -5,14 +5,23 @@ renders on the right as you type, and what you see is exactly the reveal.js
 player your students open. One Rust binary; the browser side is a little
 TypeScript around Monaco.
 
+## Quick start
+
 ```
-make            # compiles web/src with tsc, then cargo build
-SLIDES_PASSWORD=secret cargo run     # http://127.0.0.1:7100/
+git clone https://github.com/kmicinski/slides && cd slides
+SLIDES_PASSWORD=secret docker compose up -d --build
 ```
 
-Decks live in `decks/<name>/deck.md`. Create one from the deck list, or drop a
-directory in and restart. Everything on the server is a file you can read and
-edit; nothing is in a database.
+Open <http://127.0.0.1:7100/>, log in with the password, create a deck. That is
+the whole install: one container, no database. Decks live in
+`decks/<name>/deck.md` (bind-mounted, so they are plain files on your disk);
+create one from the deck list or drop a directory in and restart. To run it
+for other people, put a reverse proxy in front — [`deploy/`](deploy/) has
+three worked setups (TLS only, basic auth, Authelia) and spells out the auth
+contract for any other proxy.
+
+Without Docker: `make` (needs Rust and Node, compiles `web/src` with `tsc`
+then `cargo build`), then `SLIDES_PASSWORD=secret cargo run`.
 
 ## How it fits together
 
@@ -79,8 +88,12 @@ header says so.
 
 ## Themes and schemas
 
+Two themes ship: `default` (neutral, one blue accent — what a new deck gets)
+and `cis400` (the author's course theme, Syracuse orange, kept as a worked
+example of a branded theme). A theme is a directory:
+
 ```
-themes/cis400/
+themes/default/
   theme.toml        [reveal] options, passed to Reveal.initialize() as-is
   base.css          what markdown produces on its own: type, lists, code, tables, chrome
   highlight.css     code colours (highlight.js classes)
@@ -92,13 +105,16 @@ themes/cis400/
 ```
 
 A **schema** is any class an author writes by hand — `title-slide`,
-`section-divider`, `big-point`, `two-col`, `callout`, `stat`, `source`,
-`playground`, `footer` in the CIS400 theme. Adding a slide design means adding
-one CSS file and one example; nothing is compiled. The API lists schemas with
-their examples so a tool driving the deck knows the vocabulary, and can write
-new ones (say, from a photo of a Keynote slide). A deck picks its theme with
-`<!-- theme: cis400 -->`; without it the first theme is used. Reload the
-editor page after changing a theme.
+`section-divider`, `big-point`, `two-col`, `callout`, `figure`, `footer` in
+the default theme (cis400 adds `stat`, `source`, `playground`, `trace`).
+Adding a slide design means adding one CSS file and one example; nothing is
+compiled. The API lists schemas with their examples so a tool driving the deck
+knows the vocabulary, and can write new ones (say, from a photo of a Keynote
+slide). A deck picks its theme with `<!-- theme: cis400 -->`; without it the
+default theme is used — `SLIDES_DEFAULT_THEME` if set, else the theme named
+`default`, else the first by name. To make your own, copy `themes/default`,
+rename it, and change the `:root` palette in `base.css`; every schema uses
+only those variables. Reload the editor page after changing a theme.
 
 ## Writing decks
 
@@ -219,8 +235,17 @@ edits* switch in the editor header (on by default; `src/review.rs`):
 server's own MCP endpoint over loopback, so in review mode its edits arrive as
 proposals in the same panel; the cursor's slide is passed as context. One
 conversation per deck, resumed across messages (`--resume`; transcripts under
-`$HOME/.claude`). It needs `SLIDES_MCP_TOKEN`, a `claude` binary on `PATH`
-with OAuth credentials in `$HOME`, and picks its model from
+`$HOME/.claude`).
+
+The agent is **optional**: when it is not configured the editor has no ✦ Ask
+button and everything else works. To turn it on you need three things —
+`SLIDES_MCP_TOKEN` (it drives the deck through `/mcp`), a `claude` binary on
+`PATH` (build the image with `--build-arg CLAUDE_CLI=1`, or `CLAUDE_CLI=1` in
+`.env` with the compose file, and the official installer bakes it in), and
+credentials for it: either `ANTHROPIC_API_KEY` in the environment (pay per
+token), or a Claude Code OAuth credentials file mounted at
+`$HOME/.claude/.credentials.json` (a Claude subscription; mount it read-write,
+the CLI refreshes the token in place). It picks its model from
 `SLIDES_AGENT_MODEL` (default `claude-opus-5`) and its thinking effort from
 `SLIDES_AGENT_EFFORT` (default `medium`; slide edits are routine work and
 higher effort mostly buys minutes of thinking). Both can be overridden per
@@ -243,18 +268,29 @@ SLIDES_PASSWORD=… docker compose up -d --build
 
 binds 127.0.0.1:7100; put a reverse proxy with TLS in front. The password
 gates editing and the API; players are public. Sessions live in memory, so a
-restart logs everyone out. Environment: `SLIDES_ROOT` (default `.`),
-`SLIDES_BIND` (default `127.0.0.1:7100`), `SLIDES_PASSWORD` (unset ⇒ read-only),
-`SLIDES_MCP_TOKEN` (unset ⇒ no MCP), `SLIDES_AGENT_MODEL` (the ✦ Ask agent's model).
+restart logs everyone out. [`deploy/`](deploy/) has complete examples —
+Caddy with TLS, Caddy + basic auth, Caddy + Authelia — and the contract any
+other proxy has to meet.
 
-Behind a proxy that does its own login (Authelia, oauth2-proxy, …), set
-`TRUST_PROXY_AUTH=true` instead of a password: any request carrying a
+| Variable | Default | Meaning |
+|---|---|---|
+| `SLIDES_ROOT` | `.` | directory holding `engine/`, `themes/`, `decks/` (created if missing) |
+| `SLIDES_BIND` | `127.0.0.1:7100` | listen address |
+| `SLIDES_PASSWORD` | unset ⇒ read-only | the shared editing password |
+| `TRUST_PROXY_AUTH` | unset | `true` ⇒ a `Remote-User` header is the login (see below) |
+| `SLIDES_MCP_TOKEN` | unset ⇒ `/mcp` off | bearer token for the MCP endpoint |
+| `SLIDES_DEFAULT_THEME` | `default` | theme for decks that name none, and the new-deck form's preselection |
+| `SLIDES_AGENT_MODEL` / `SLIDES_AGENT_EFFORT` | `claude-opus-5` / `medium` | the ✦ Ask agent's defaults |
+| `ANTHROPIC_API_KEY` | unset | credentials for the agent's `claude` CLI (or mount an OAuth credentials file) |
+
+Behind a proxy that does its own login (Authelia, oauth2-proxy, basic auth …),
+set `TRUST_PROXY_AUTH=true` instead of a password: any request carrying a
 `Remote-User` header is treated as logged in, and `/login` is never shown. The
 proxy must then (a) require login for everything except the public player
 paths — `/deck/<name>/` and its assets, `/engine/*`, `/themes/*` — but
-including `/deck/<name>/live` and `/deck/<name>/ws`, and (b) strip any
-client-supplied `Remote-User` on the paths it lets through anonymously.
-Tools reach `/api` with whatever session the proxy accepts.
+including `/deck/<name>/live`, `…/ws` and `…/thumb`, and (b) strip any
+client-supplied `Remote-User` on the paths it lets through anonymously,
+`/mcp` included. Tools reach `/api` with whatever session the proxy accepts.
 
 ## Developing
 
@@ -262,3 +298,8 @@ Tools reach `/api` with whatever session the proxy accepts.
 TypeScript compiled by `tsc` (no bundler); Monaco and monaco-emacs load from
 CDNs through Monaco's AMD loader, exactly as in the notes app. The Rust
 binary embeds `web/dist/*.js`, so run `make web` after touching `web/src`.
+
+## License
+
+MIT (see `LICENSE`). The vendored reveal.js, KaTeX and fonts have their own
+licenses, listed in `THIRD-PARTY.md`.

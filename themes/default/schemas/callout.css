@@ -1,0 +1,36 @@
+/* ---------- Callouts ---------- */
+
+.reveal .callout {
+  background: var(--page-soft);
+  border-left: 5px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.45em 0.85em;
+  margin: 0.38em 0;
+  font-size: 0.85em;
+  color: var(--ink);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+}
+
+.reveal .callout.note {
+  background: #eef2fb;
+  border-left-color: var(--heading-soft);
+}
+
+.reveal .callout.good {
+  background: #ecf8ef;
+  border-left-color: var(--good);
+}
+
+.reveal .callout.warn {
+  background: #fdf3e7;
+  border-left-color: var(--warn);
+}
+
+.reveal .callout.bad {
+  background: #fdecec;
+  border-left-color: var(--bad);
+}
+
+.reveal .callout strong {
+  color: var(--accent-deep);
+}

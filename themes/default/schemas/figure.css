@@ -1,0 +1,36 @@
+/* ---------- Figures: inline SVG diagrams in the theme's palette ---------- */
+/* Author the SVG with class names, not colours; fragments work on <g>/<tspan>. */
+
+.reveal .figure { width: 100%; margin: 0.35em auto; }
+.reveal .figure.narrow { width: 86%; }
+.reveal .figure svg {
+  display: block; width: 100%; height: auto; overflow: visible;
+  font-family: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+.reveal .figure text { font-size: 26px; fill: var(--text); }
+.reveal .figure .fig-title { font-weight: 800; fill: var(--heading); }
+.reveal .figure .fig-small { font-size: 21px; fill: var(--muted); font-weight: 400; }
+.reveal .figure .fig-mono { font-family: "JetBrains Mono", Menlo, Consolas, monospace; font-size: 23px; }
+.reveal .figure .sub { font-size: 65%; baseline-shift: sub; }
+.reveal .figure .fig-num { font-weight: 800; fill: var(--accent); }
+.reveal .figure .fig-accent { fill: var(--accent-deep); font-weight: 700; }
+.reveal .figure .fig-heading { fill: var(--heading); font-weight: 700; }
+.reveal .figure .fig-accent2 { fill: var(--accent2-deep); font-weight: 700; }
+.reveal .figure .fig-bad { fill: var(--bad); font-weight: 700; }
+
+.reveal .figure .fig-box { fill: #fff; stroke: var(--heading); stroke-width: 3; }
+.reveal .figure .fig-box.model { fill: #eef3ff; stroke: var(--accent); }
+.reveal .figure .fig-box.world { fill: #e9f6f8; stroke: var(--accent2-deep); }
+.reveal .figure .fig-box.ctx { fill: var(--page-soft); stroke: var(--muted); }
+
+.reveal .figure .fig-arrow { fill: none; stroke: var(--heading); stroke-width: 3.5; stroke-linecap: round; }
+.reveal .figure .fig-arrow.model { stroke: var(--accent); }
+.reveal .figure .fig-arrow.world { stroke: var(--accent2-deep); }
+.reveal .figure .fig-arrow.muted { stroke: var(--muted); }
+.reveal .figure .fig-boundary { fill: none; stroke: var(--bad); stroke-width: 3; stroke-dasharray: 12 10; }
+.reveal .figure .fig-boundary.muted { stroke: var(--rule); }
+
+/* A compact comparison table next to / instead of a figure */
+.reveal table.figure-table { font-size: 0.72em; border-collapse: collapse; width: 100%; margin: 0.3em 0; }
+.reveal table.figure-table th, .reveal table.figure-table td { padding: 0.3em 0.6em; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+.reveal table.figure-table th { color: var(--heading); }

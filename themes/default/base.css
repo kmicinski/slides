@@ -1,0 +1,337 @@
+/*
+ * default theme — a neutral, single-accent look for any course or talk.
+ * White slides, slate text, one blue accent, solarized-light code
+ * (highlight.css). Copy this directory to start a theme of your own; the
+ * palette is the :root block below and every schema uses only these names.
+ *
+ * This file styles what markdown produces on its own. Every class an author
+ * writes by hand (title-slide, callout, two-col, ...) is a schema in
+ * schemas/<name>.css with a worked example in schemas/<name>.md.
+ */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/InterVariable.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/JetBrainsMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/JetBrainsMono-SemiBold.woff2") format("woff2");
+}
+
+:root {
+  --accent: #2563eb;          /* the one brand colour: headings' rule, bullets, links */
+  --accent-soft: #60a5fa;
+  --accent-deep: #1e40af;
+  --accent2: #0d9488;         /* secondary accent for gradients and "info" emphasis */
+  --accent2-deep: #0f766e;
+  --heading: #0f172a;
+  --heading-soft: #334155;
+  --heading-deep: #020617;
+  --ink: #1a1a1a;
+  --text: #293241;
+  --muted: #64748b;
+  --gold: #b58900;            /* solarized yellow — harmonizes with code blocks */
+  --good: #15803d;
+  --warn: #b45309;
+  --bad: #b91c1c;
+  --page: #ffffff;
+  --page-soft: #f8f8f6;
+  --rule: #e2e5ea;
+  --code-bg: #fdf6e3;         /* solarized base3 */
+}
+
+
+.reveal-viewport {
+  background: var(--page);
+  background-attachment: fixed;
+}
+
+.reveal {
+  font-family: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 29px;
+  font-weight: 400;
+  color: var(--text);
+  letter-spacing: 0.003em;
+}
+
+.reveal .slides {
+  text-align: left;
+}
+
+.reveal .slides > section,
+.reveal .slides > section > section {
+  padding: 8px 20px;
+  line-height: 1.28;
+}
+
+/* Subtle accent bar along the top of every slide */
+.reveal .slides > section::before,
+.reveal .slides > section > section::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent2) 100%);
+  opacity: 0.9;
+}
+
+/* ---------- Headings ---------- */
+
+.reveal h1,
+.reveal h2,
+.reveal h3,
+.reveal h4,
+.reveal h5,
+.reveal h6 {
+  font-family: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-weight: 900;
+  line-height: 1.08;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  margin: 0 0 0.28em 0;
+  text-shadow: none;
+  color: var(--heading);
+}
+
+.reveal h1 {
+  font-size: 2.4em;
+  color: var(--accent);
+}
+
+.reveal h2 {
+  font-size: 1.7em;
+  color: var(--heading);
+  border-bottom: 4px solid var(--accent);
+  padding-bottom: 0.1em;
+  margin-bottom: 0.32em;
+  display: inline-block;
+}
+
+.reveal h3 {
+  font-size: 1.25em;
+  color: var(--accent-deep);
+}
+
+.reveal h4 {
+  font-size: 1.05em;
+  color: var(--heading-soft);
+}
+
+.reveal p {
+  margin: 0.32em 0;
+  line-height: 1.38;
+  color: var(--text);
+}
+
+.reveal strong {
+  color: var(--accent-deep);
+  font-weight: 700;
+}
+
+.reveal em {
+  color: var(--heading-soft);
+  font-style: italic;
+}
+
+.reveal a,
+.reveal a:visited {
+  color: var(--accent-deep);
+  text-decoration: none;
+  border-bottom: 2px solid rgba(37, 99, 235, 0.4);
+  transition: all 0.12s ease-in-out;
+}
+
+.reveal a:hover {
+  color: var(--heading);
+  border-bottom-color: var(--heading);
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.reveal ul,
+.reveal ol {
+  display: block;
+  margin-left: 1.1em;
+}
+
+.reveal ul li,
+.reveal ol li {
+  margin: 0.18em 0;
+  color: var(--text);
+}
+
+.reveal ul {
+  list-style: none;
+}
+
+/* A blank line between bullets makes CommonMark emit a "loose" list, wrapping
+   each item's text in <p>. That would push the text below the ▸ marker and add
+   paragraph margins, so a stray blank line in a deck silently wrecks the slide.
+   Render loose items like tight ones. */
+.reveal li > p {
+  margin: 0;
+}
+
+.reveal li > p:first-child {
+  display: inline;
+}
+
+.reveal ul li::before {
+  content: "▸";
+  color: var(--accent);
+  display: inline-block;
+  width: 1em;
+  margin-left: -1em;
+  font-weight: 700;
+}
+
+.reveal blockquote {
+  display: block;
+  position: relative;
+  background: var(--page-soft);
+  border-left: 5px solid var(--accent);
+  margin: 0.6em 0;
+  padding: 0.55em 0.9em;
+  width: 95%;
+  color: var(--text);
+  font-style: italic;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
+  border-radius: 6px;
+}
+
+/* ---------- Code ---------- */
+
+.reveal code {
+  font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  background: var(--code-bg);
+  color: var(--accent-deep);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-size: 0.92em;
+  border: 1px solid var(--rule);
+}
+
+.reveal pre {
+  font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  display: block;
+  width: 100%;
+  margin: 0.4em auto;
+  font-size: 0.56em;
+  line-height: 1.32;
+  box-shadow: 0 6px 22px rgba(15, 23, 42, 0.1);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+.reveal pre::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent2) 100%);
+  z-index: 2;
+}
+
+.reveal pre code {
+  display: block;
+  padding: 0.6em 1.1em 0.6em 1.1em;
+  max-height: 640px;
+  word-wrap: normal;
+  background: var(--code-bg);
+  color: #657b83;   /* solarized base00 */
+  border-radius: 0;
+  border: none;
+}
+
+.reveal pre code.hljs {
+  padding: 0.6em 1.1em 0.6em 1.1em;
+  background: var(--code-bg);
+}
+
+/* Terminal / shell blocks are dark */
+.reveal pre.terminal code,
+.reveal pre code.language-console {
+  background: #10151f;
+  color: #d7dde8;
+}
+
+/* ---------- Tables ---------- */
+
+.reveal table {
+  margin: 0.4em auto;
+  border-collapse: collapse;
+  border-spacing: 0;
+  background: var(--page);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+}
+
+.reveal table th {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  padding: 0.28em 0.7em;
+  text-align: left;
+  border: none;
+}
+
+.reveal table td {
+  padding: 0.22em 0.7em;
+  border-top: 1px solid var(--rule);
+  color: var(--text);
+}
+
+.reveal table tr:nth-child(even) td {
+  background: var(--page-soft);
+}
+
+
+/* ---------- Slide number + controls ---------- */
+
+.reveal .slide-number {
+  background: var(--accent);
+  color: #fff;
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.reveal .controls {
+  color: var(--accent);
+}
+
+.reveal .progress {
+  color: var(--accent);
+  height: 5px;
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.reveal .progress span {
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent2) 100%);
+}
+
+/* ---------- Print / PDF tweaks ---------- */
+
+@media print {
+  .reveal-viewport {
+    background: #ffffff !important;
+  }
+}

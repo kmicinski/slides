@@ -1,0 +1,49 @@
+# Proxy-auth mode with Authelia. Same shape as the basic-auth example: the
+# login routes go through forward_auth, which sets Remote-User from
+# Authelia's reply; the public player paths and /mcp skip it and have any
+# client-supplied Remote-* stripped.
+# Snippets must come before the sites that import them.
+(login) {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+	}
+	reverse_proxy slides:7100
+}
+
+{$AUTH_HOST} {
+	reverse_proxy authelia:9091
+}
+
+{$SLIDES_HOST} {
+	encode gzip
+
+	@mcp path /mcp /mcp/*
+	handle @mcp {
+		reverse_proxy slides:7100 {
+			header_up -Remote-User
+			header_up -Remote-Groups
+			header_up -Remote-Name
+			header_up -Remote-Email
+		}
+	}
+
+	@live path_regexp ^/deck/[^/]+/(live|ws|thumb)$
+	handle @live {
+		import login
+	}
+
+	@public path /deck /deck/* /engine/* /themes/*
+	handle @public {
+		reverse_proxy slides:7100 {
+			header_up -Remote-User
+			header_up -Remote-Groups
+			header_up -Remote-Name
+			header_up -Remote-Email
+		}
+	}
+
+	handle {
+		import login
+	}
+}

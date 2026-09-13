@@ -1,0 +1,37 @@
+/* ---------- Title slide ---------- */
+
+.reveal section.title-slide {
+  text-align: center;
+}
+
+.reveal section.title-slide h1 {
+  font-size: 3em;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep) 55%, var(--heading) 115%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 0.2em;
+}
+
+.reveal section.title-slide h2 {
+  font-size: 1.1em;
+  color: var(--heading);
+  border: none;
+  display: block;
+  font-weight: 400;
+  margin-top: 0.3em;
+}
+
+.reveal section.title-slide .course-tag {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  padding: 0.28em 0.9em;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 0.7em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 0.8em;
+}
+

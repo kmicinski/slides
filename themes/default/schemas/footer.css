@@ -1,0 +1,13 @@
+/* ---------- Footer branding ---------- */
+
+.reveal .footer {
+  position: absolute;
+  bottom: 14px;
+  right: 24px;
+  font-size: 14px;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+

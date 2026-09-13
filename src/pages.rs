@@ -39,10 +39,14 @@ pub async fn index(State(app): State<Shared>, headers: HeaderMap) -> Html<String
         format!(r#"<li><a href="/deck/{name}/">{title}</a> <span class="name">{name}</span>{edit}</li>"#)
     }).collect();
     let form = if editing {
+        let default = theme::default(&app.root).map(|t| t.name).unwrap_or_default();
         let themes: String = theme::list(&app.root)
             .unwrap_or_default()
             .iter()
-            .map(|t| format!(r#"<option>{}</option>"#, escape(&t.name)))
+            .map(|t| {
+                let sel = if t.name == default { " selected" } else { "" };
+                format!(r#"<option{sel}>{}</option>"#, escape(&t.name))
+            })
             .collect();
         format!(
             r#"<form method="post" action="/new"><input name="name" placeholder="new-deck-name" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" required> <select name="theme">{themes}</select> <button>create</button></form>"#

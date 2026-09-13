@@ -5,3 +5,7 @@
 !/decks/.gitkeep
 .DS_Store
 /agent-home
+/deploy/*/decks/*
+!/deploy/*/decks/.gitkeep
+/deploy/*/.env
+/deploy/caddy-authelia/authelia/

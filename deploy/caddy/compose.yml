@@ -1,0 +1,35 @@
+# Password mode behind Caddy with automatic TLS. Needs DNS for $SLIDES_HOST
+# pointing at this machine and ports 80/443 reachable (for the certificate).
+services:
+  slides:
+    build:
+      context: ../..
+      args:
+        CLAUDE_CLI: ${CLAUDE_CLI:-0}
+    environment:
+      - SLIDES_PASSWORD=${SLIDES_PASSWORD:?set SLIDES_PASSWORD in .env}
+      - SLIDES_MCP_TOKEN=${SLIDES_MCP_TOKEN:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - SLIDES_AGENT_MODEL=${SLIDES_AGENT_MODEL:-claude-opus-5}
+    volumes:
+      - ./decks:/app/decks
+      - ../../themes:/app/themes
+      - slides_home:/home/slides
+    expose: ["7100"]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    environment:
+      - SLIDES_HOST=${SLIDES_HOST:?set SLIDES_HOST in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  slides_home:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,6 @@
+# Password mode: the app shows its own login page for editing; players are
+# public; /mcp checks its own bearer token. Caddy only adds TLS.
+{$SLIDES_HOST} {
+	encode gzip
+	reverse_proxy slides:7100
+}

@@ -147,9 +147,18 @@ export function init(host: Host) {
     modelSel.value = localStorage.getItem("slides.ask.model") ?? "";
     effortSel.value = localStorage.getItem("slides.ask.effort") ?? "medium";
   } catch { /* storage may be unavailable */ }
-  fetch("/api/agent/defaults").then((r) => r.json()).then((d: { model: string; effort: string }) => {
+  fetch("/api/agent/defaults").then((r) => r.json()).then((d: { model: string; effort: string; available: boolean; unavailable?: string }) => {
     modelSel.options[0].textContent = `default (${d.model.replace("claude-", "")})`;
     if (!effortSel.value) effortSel.value = d.effort;
+    if (!d.available) {
+      // No agent on this server: the drawer opens on Review, and Ask explains
+      // itself instead of failing on send.
+      $("open-ask").hidden = true;
+      drawer.querySelector<HTMLButtonElement>('nav button[data-tab="ask"]')!.hidden = true;
+      $<HTMLFormElement>("ask-form").hidden = true;
+      transcript.insertAdjacentHTML("afterend", `<p class="empty">The in-app agent is not configured on this server (${esc(d.unavailable ?? "")}). See README.md, "Review mode and the in-app agent".</p>`);
+      if (!drawer.hidden && !$("tab-ask").hidden) show("review");
+    }
   }).catch(() => {});
   modelSel.onchange = () => { try { localStorage.setItem("slides.ask.model", modelSel.value); } catch {} };
   effortSel.onchange = () => { try { localStorage.setItem("slides.ask.effort", effortSel.value); } catch {} };

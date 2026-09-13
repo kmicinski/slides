@@ -15,7 +15,7 @@
 //! `TRUST_PROXY_AUTH=true` (the proxy's `Remote-User` header is the login;
 //! see `auth.rs`), `SLIDES_MCP_TOKEN` (bearer token for the `/mcp` endpoint;
 //! unset ⇒ disabled; see `mcp.rs`), `SLIDES_AGENT_MODEL` (the in-app agent's
-//! model; see `agent.rs`).
+//! model; see `agent.rs`), `SLIDES_DEFAULT_THEME` (see `theme.rs`).
 
 mod agent;
 mod assets;
@@ -68,7 +68,9 @@ impl App {
     /// Opens every `decks/*/deck.md`, which also refreshes each player.
     fn load_decks(&self) -> anyhow::Result<()> {
         let mut docs = self.docs.lock().unwrap();
-        for entry in fs::read_dir(self.root.join("decks"))?.filter_map(Result::ok) {
+        let decks = self.root.join("decks");
+        fs::create_dir_all(&decks)?;
+        for entry in fs::read_dir(&decks)?.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().into_owned();
             if valid_name(&name) && entry.path().join("deck.md").is_file() {
                 docs.insert(name.clone(), Doc::open(&self.root, &name)?);

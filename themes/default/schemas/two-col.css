@@ -1,0 +1,14 @@
+/* ---------- Two-column helper ---------- */
+
+.reveal .two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1em;
+  align-items: start;
+}
+
+.reveal .col-left,
+.reveal .col-right {
+  min-width: 0;
+}
+

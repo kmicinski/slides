@@ -258,9 +258,17 @@ pub async fn agent_send(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// Defaults for the Ask form's model/effort selects.
+/// Defaults for the Ask form's model/effort selects, and whether the agent is
+/// configured at all (the editor hides ✦ Ask when it is not).
 pub async fn agent_defaults(State(app): State<Shared>) -> Json<Value> {
-    Json(json!({ "model": app.agent.model, "effort": app.agent.effort, "efforts": agent::EFFORTS }))
+    let unavailable = app.agent.available().err();
+    Json(json!({
+        "model": app.agent.model,
+        "effort": app.agent.effort,
+        "efforts": agent::EFFORTS,
+        "available": unavailable.is_none(),
+        "unavailable": unavailable,
+    }))
 }
 
 /// Today as YYYY-MM-DD (UTC) for the agent's prompt; civil-from-days, no chrono.

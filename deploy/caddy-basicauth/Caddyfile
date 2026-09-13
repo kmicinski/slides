@@ -1,0 +1,57 @@
+# Proxy-auth mode with basic auth. The app treats a Remote-User header as
+# proof of login (TRUST_PROXY_AUTH=true), so this file does three things:
+# require a login on the editing routes and set Remote-User from it, let the
+# public player paths and /mcp through, and strip any Remote-* header a
+# client sent on those public paths.
+#
+# Add users with:  docker run --rm caddy:2 caddy hash-password --plaintext 'pw'
+# Snippets must come before the sites that import them.
+(login) {
+	basic_auth {
+		# user  bcrypt-hash   (one line per user)
+		alice $2a$14$REPLACE_WITH_OUTPUT_OF_caddy_hash-password
+	}
+	reverse_proxy slides:7100 {
+		header_up Remote-User {http.auth.user.id}
+		header_up -Remote-Groups
+		header_up -Remote-Name
+		header_up -Remote-Email
+	}
+}
+
+{$SLIDES_HOST} {
+	encode gzip
+
+	# /mcp: the app checks its own bearer token (SLIDES_MCP_TOKEN).
+	@mcp path /mcp /mcp/*
+	handle @mcp {
+		reverse_proxy slides:7100 {
+			header_up -Remote-User
+			header_up -Remote-Groups
+			header_up -Remote-Name
+			header_up -Remote-Email
+		}
+	}
+
+	# Editing features that live under /deck/<name>/ — stay behind the login.
+	@live path_regexp ^/deck/[^/]+/(live|ws|thumb)$
+	handle @live {
+		import login
+	}
+
+	# Public players: /deck/<name>/ and its files, the engine, the themes.
+	@public path /deck /deck/* /engine/* /themes/*
+	handle @public {
+		reverse_proxy slides:7100 {
+			header_up -Remote-User
+			header_up -Remote-Groups
+			header_up -Remote-Name
+			header_up -Remote-Email
+		}
+	}
+
+	# Everything else: deck list, editor, /api.
+	handle {
+		import login
+	}
+}
