@@ -114,7 +114,8 @@ slide). A deck picks its theme with `<!-- theme: cis400 -->`; without it the
 default theme is used — `SLIDES_DEFAULT_THEME` if set, else the theme named
 `default`, else the first by name. To make your own, copy `themes/default`,
 rename it, and change the `:root` palette in `base.css`; every schema uses
-only those variables. Reload the editor page after changing a theme.
+only those variables. The step-by-step is in [`themes/README.md`](themes/README.md).
+Reload the editor page after changing a theme.
 
 ## Writing decks
 
