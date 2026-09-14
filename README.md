@@ -169,7 +169,7 @@ through untouched. Tools (`src/mcp.rs`):
 | `pdf_text` / `render_pdf_page` | find where a figure is in a fetched PDF, look at the page (the reply carries a preview image), and cut a region out to a PNG in the deck folder |
 | `list_assets` | images in the deck folder and PDFs in its sources |
 | `open_changeset` | review mode: group the writes that follow under a title the author can accept or reject in one go |
-| `get_proposal` / `await_review` / `withdraw_proposal` | review mode: see each changeset and op's status and the author's comments, wait for a decision, take an op or a changeset back |
+| `get_proposal` / `await_review` / `withdraw_proposal` | review mode: see each changeset and op's status (incl. which other writers' ops it `conflicts` with) and the author's comments, wait for a decision, take an op or a changeset back |
 
 Assets: a deck folder is public, so images the tools save there are served
 at `/deck/<name>/<file>` and go into `export.zip`; slides use them as
@@ -230,13 +230,32 @@ edits* switch in the editor header (on by default; `src/review.rs`):
   changeset back.
 - Accepting splices the change through the same code the direct tools use;
   nothing else in the proposal moves. State lives in `decks/<name>/.slides.json`.
+- Several writers at once — parallel Ask threads (below), remote MCP sessions —
+  each get their own changesets (an Ask run's MCP requests carry an
+  `X-Slides-Thread` header; a writer re-proposing a slide replaces only its
+  *own* earlier op for it). Ops on different slides simply compose in the fork.
+  Ops from different changesets that touch the **same slide** (both replace or
+  delete it, one inserts after a slide the other deletes, or one rewrites the
+  whole deck) are in **conflict**: neither is in the shared fork, each card
+  is previewed on its own (`thumb?view=op`, and the compare view's lower player
+  shows "this proposal alone"), and neither can be accepted — accept-all skips
+  them — until the author settles it from the card or the compare bar:
+  **✦ merge with AI** (`m`; the usual choice — starts a *merge thread* that
+  is handed both proposals and the author's original requests and writes one
+  slide that honours both; its changeset lists the ops it reconciles and its
+  first write marks them `merged`), **keep this** (`k`), or **keep other**
+  (`o`). Endpoint: `POST /api/decks/<name>/proposal/<op>/conflict/{merge|keep|keep_other}`.
 
 **✦ Ask** opens a chat with an agent that edits the deck for you
 (`src/agent.rs`). It is a headless `claude -p` run whose only tools are this
 server's own MCP endpoint over loopback, so in review mode its edits arrive as
-proposals in the same panel; the cursor's slide is passed as context. One
-conversation per deck, resumed across messages (`--resume`; transcripts under
-`$HOME/.claude`).
+proposals in the same panel; the cursor's slide is passed as context. Every
+question is its own **thread** — its own `claude` session (follow-ups
+`--resume` it; transcripts under `$HOME/.claude`), transcript and changesets —
+and threads run **in parallel**: the Ask tab is an inbox of threads with live
+status, send from it to ask something new without waiting, open a thread to
+read its reply and follow up. Where two threads changed the same slide the
+Review tab shows a conflict to merge or settle (above).
 
 The agent is **optional**: when it is not configured the editor has no ✦ Ask
 button and everything else works. To turn it on you need three things —

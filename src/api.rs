@@ -17,10 +17,16 @@
 //! GET  /api/decks/{name}/state                     → review state view (see review.rs)
 //! PUT  /api/decks/{name}/review        ← {review}  toggle review mode for the deck
 //! POST /api/decks/{name}/proposal/{op}/{action}    accept | reject | comment {comment} | withdraw
+//! POST /api/decks/{name}/proposal/{op}/conflict/{how}
+//!                                                  settle a conflict: keep (this op) | keep_other {other} |
+//!                                                  merge {model?, effort?} — starts a merge thread → {thread}
 //! POST /api/decks/{name}/changeset/{id}/{action}   accept | reject | withdraw every pending op of a changeset
 //! POST /api/decks/{name}/proposal/clear            drop resolved ops
-//! POST /api/decks/{name}/agent         ← {message, slide?}   start an agent run
-//! POST /api/decks/{name}/agent/stop, /agent/reset
+//! POST /api/decks/{name}/agent         ← {message, slide?, thread?, model?, effort?}
+//!                                                  ask: a new thread, or a follow-up in `thread` → {thread}
+//! POST /api/decks/{name}/agent/stop    ← {thread?} stop one thread's run (all of them without)
+//! POST /api/decks/{name}/agent/reset               drop every thread
+//! POST /api/decks/{name}/agent/thread/{id}/close   drop one thread (its proposals stay)
 //! ```
 //!
 //! Authenticate with the session cookie or `Authorization: Bearer <SLIDES_PASSWORD>`.
@@ -93,6 +99,7 @@ pub async fn put_deck(
                     false,
                     text,
                     "replaced the whole deck via PUT /api".into(),
+                    None,
                 )
                 .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
             return Ok((
@@ -199,17 +206,44 @@ pub struct AgentMessage {
     message: String,
     #[serde(default)]
     slide: Option<usize>,
+    /// Follow up in this thread; without it the message starts a new one.
+    #[serde(default)]
+    thread: Option<u32>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
 }
 
+/// The Ask form's model/effort, checked.
+fn run_options(model: Option<String>, effort: Option<String>) -> ApiResult<agent::RunOptions> {
+    let model = model
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let ok = s
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-._".contains(c));
+            ok.then_some(s)
+                .ok_or((StatusCode::BAD_REQUEST, "bad model id".to_string()))
+        })
+        .transpose()?;
+    let effort = effort
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            agent::EFFORTS
+                .contains(&s.as_str())
+                .then_some(s)
+                .ok_or((StatusCode::BAD_REQUEST, "bad effort".to_string()))
+        })
+        .transpose()?;
+    Ok(agent::RunOptions { model, effort })
+}
+
 pub async fn agent_send(
     State(app): State<Shared>,
     Path(name): Path<String>,
     Json(m): Json<AgentMessage>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<(StatusCode, Json<Value>)> {
     let doc = doc_of(&app, &name)?;
     let message = m.message.trim().to_string();
     if message.is_empty() {
@@ -231,31 +265,45 @@ pub async fn agent_send(
             }
         );
     }
-    let model = m
-        .model
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            let ok = s
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-._".contains(c));
-            ok.then_some(s)
-                .ok_or((StatusCode::BAD_REQUEST, "bad model id".to_string()))
-        })
-        .transpose()?;
-    let effort = m
-        .effort
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            agent::EFFORTS
-                .contains(&s.as_str())
-                .then_some(s)
-                .ok_or((StatusCode::BAD_REQUEST, "bad effort".to_string()))
-        })
-        .transpose()?;
-    let opts = agent::RunOptions { model, effort };
-    agent::start(app.clone(), doc, name, message, context, opts)
+    let opts = run_options(m.model, m.effort)?;
+    let thread = agent::start(app.clone(), doc, name, m.thread, message, context, opts)
         .map_err(|e| (StatusCode::CONFLICT, e))?;
-    Ok(StatusCode::ACCEPTED)
+    Ok((StatusCode::ACCEPTED, Json(json!({ "thread": thread }))))
+}
+
+#[derive(Deserialize, Default)]
+pub struct ConflictBody {
+    #[serde(default)]
+    other: Option<u32>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+}
+
+/// Settles a conflict: `keep` this op, `keep_other` (body `other`), or
+/// `merge` — a merge thread reconciles this op with everything it conflicts with.
+pub async fn conflict_action(
+    State(app): State<Shared>,
+    Path((name, op, how)): Path<(String, u32, String)>,
+    Json(body): Json<ConflictBody>,
+) -> ApiResult<Json<Value>> {
+    let doc = doc_of(&app, &name)?;
+    let mut v = match how.as_str() {
+        "keep" => doc.resolve_conflict(op, None),
+        "keep_other" => {
+            let other = body.other.ok_or((StatusCode::BAD_REQUEST, "missing 'other'".to_string()))?;
+            doc.resolve_conflict(op, Some(other))
+        }
+        "merge" => {
+            let opts = run_options(body.model, body.effort)?;
+            agent::start_merge(app.clone(), doc.clone(), name, op, opts).map(|t| json!({ "thread": t }))
+        }
+        _ => return Err((StatusCode::NOT_FOUND, "no such action".into())),
+    }
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    v["state"] = doc.state_view();
+    Ok(Json(v))
 }
 
 /// Defaults for the Ask form's model/effort selects, and whether the agent is
@@ -272,7 +320,7 @@ pub async fn agent_defaults(State(app): State<Shared>) -> Json<Value> {
 }
 
 /// Today as YYYY-MM-DD (UTC) for the agent's prompt; civil-from-days, no chrono.
-fn date_today() -> String {
+pub fn date_today() -> String {
     let z = (crate::review::now() / 86400) as i64 + 719468;
     let era = z.div_euclid(146097);
     let doe = z.rem_euclid(146097);
@@ -285,12 +333,23 @@ fn date_today() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+#[derive(Deserialize, Default)]
+pub struct ThreadBody {
+    #[serde(default)]
+    thread: Option<u32>,
+}
+
 pub async fn agent_stop(
     State(app): State<Shared>,
     Path(name): Path<String>,
+    body: Option<Json<ThreadBody>>,
 ) -> ApiResult<StatusCode> {
     doc_of(&app, &name)?;
-    Ok(if app.agent.stop(&name) {
+    let stopped = match body.and_then(|Json(b)| b.thread) {
+        Some(t) => app.agent.stop(&name, t),
+        None => app.agent.stop_all(&name) > 0,
+    };
+    Ok(if stopped {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
@@ -302,8 +361,18 @@ pub async fn agent_reset(
     Path(name): Path<String>,
 ) -> ApiResult<StatusCode> {
     let doc = doc_of(&app, &name)?;
-    app.agent.stop(&name);
+    app.agent.stop_all(&name);
     doc.agent_reset();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn thread_close(
+    State(app): State<Shared>,
+    Path((name, thread)): Path<(String, u32)>,
+) -> ApiResult<StatusCode> {
+    let doc = doc_of(&app, &name)?;
+    app.agent.stop(&name, thread);
+    doc.thread_close(thread);
     Ok(StatusCode::NO_CONTENT)
 }
 

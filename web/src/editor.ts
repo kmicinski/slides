@@ -24,13 +24,14 @@ const status = (s: string) => { statusEl.textContent = s; };
  */
 class Player {
   proposed = false;
+  op: number | undefined; // show the deck with just this op applied (a conflicted op)
   at: { h: number; v: number } | null = null;
   constructor(readonly frame: HTMLIFrameElement) {}
   private post(m: unknown) { this.frame.contentWindow?.postMessage(m, location.origin); }
-  view(proposed: boolean) { this.proposed = proposed; this.post({ type: "view", proposed }); }
+  view(proposed: boolean, op?: number) { this.proposed = proposed; this.op = op; this.post({ type: "view", proposed, op }); }
   goto(h: number, v: number) { this.at = { h, v }; this.post({ type: "goto", h, v }); }
   repeat() {
-    this.post({ type: "view", proposed: this.proposed });
+    this.post({ type: "view", proposed: this.proposed, op: this.op });
     if (this.at) this.post({ type: "goto", ...this.at });
   }
 }
@@ -193,8 +194,9 @@ function connect(editor: monaco.editor.IStandaloneCodeEditor) {
         players.current.goto(0, 0);
       }
       overlay.hidden = op.kind !== "delete";
-      // Bottom: the forked deck at where the op's result landed.
-      players.proposed.view(true);
+      // Bottom: the forked deck at where the op's result landed — or, for an
+      // op in conflict (left out of the shared fork), the deck with just it applied.
+      players.proposed.view(true, op.conflicts.length ? op.id : undefined);
       if (op.proposed_col) players.proposed.goto(op.proposed_col - 1, op.proposed_row - 1);
     },
     cursorSlide() {

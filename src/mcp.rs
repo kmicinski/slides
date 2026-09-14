@@ -20,6 +20,9 @@
 //! op's status and the author's comments, and `await_review` waits for them.
 //! Writes are grouped into *changesets* the author can accept or reject as a
 //! whole: `open_changeset` starts a named one for the writes that follow.
+//! Writers are told apart by the `X-Slides-Thread` header the in-app agent's
+//! runs send (`agent.rs`); a remote session has none. Two writers' ops on the
+//! same slide *conflict* and wait for the author (`review.rs`).
 
 use crate::deck::{self, Deck, Diagnostic, Renderer};
 use crate::review::Kind;
@@ -107,10 +110,24 @@ fn check_bearer(app: &Shared, headers: &HeaderMap) -> Result<(), (StatusCode, &'
     }
 }
 
+/// The agent thread behind a request, from the `X-Slides-Thread: <deck>:<id>`
+/// header its MCP config carries (`agent.rs`); remote sessions send none.
+fn thread_header(headers: &HeaderMap) -> Option<(String, u32)> {
+    let v = headers.get(crate::agent::THREAD_HEADER)?.to_str().ok()?;
+    let (deck, id) = v.rsplit_once(':')?;
+    Some((deck.to_string(), id.parse().ok()?))
+}
+
+/// The thread a write to `deck` is attributed to: the request's thread, if it is that deck's.
+fn thread_for(thread: &Option<(String, u32)>, deck: &str) -> Option<u32> {
+    thread.as_ref().filter(|(d, _)| d == deck).map(|(_, id)| *id)
+}
+
 pub async fn handler(State(app): State<Shared>, headers: HeaderMap, body: String) -> Response {
     if let Err(resp) = check_bearer(&app, &headers) {
         return resp.into_response();
     }
+    let thread = thread_header(&headers);
     let req: JsonRpcRequest = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(e) => return err(Value::Null, -32700, format!("parse error: {e}")),
@@ -130,7 +147,7 @@ pub async fn handler(State(app): State<Shared>, headers: HeaderMap, body: String
         ),
         "ping" => ok(id, json!({})),
         "tools/list" => ok(id, json!({ "tools": tool_catalog() })),
-        "tools/call" => match tools_call(&app, req.params).await {
+        "tools/call" => match tools_call(&app, req.params, thread).await {
             Ok(v) => ok(id, tool_result(v)),
             Err(msg) => ok(id, tool_error(&msg)),
         },
@@ -240,7 +257,7 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "get_proposal",
-            "description": "Review state of a deck: whether review mode is on, its changesets (title, open, counts), and every proposed op with its changeset, status (pending / accepted / rejected), whether it went stale (the author edited that slide), and the author's comment asking for changes. Check this before revising work the author has commented on.",
+            "description": "Review state of a deck: whether review mode is on, its changesets (title, open, thread, counts), and every proposed op with its changeset, status (pending / accepted / rejected / merged), whether it went stale (the author edited that slide), the ids of other writers' pending ops it `conflicts` with (same slide; the author keeps one or has the agent merge them — not yours to resolve), and the author's comment asking for changes. Check this before revising work the author has commented on.",
             "inputSchema": obj(json!({ "deck": deck }), &["deck"])
         }),
         json!({
@@ -494,7 +511,7 @@ fn proposed(doc: &crate::live::Doc, op: Value) -> Value {
     })
 }
 
-async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
+async fn tools_call(app: &Shared, params: Value, thread: Option<(String, u32)>) -> Result<Value, String> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
@@ -532,7 +549,8 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
             let a: SourceArg = parse(&args)?;
             let deck = match app.doc(&a.deck) {
                 Some(doc) if doc.review() => {
-                    let op = doc.propose(Kind::Deck, None, false, a.source, a.note)?;
+                    let t = thread_for(&thread, &a.deck);
+                    let op = doc.propose(Kind::Deck, None, false, a.source, a.note, t)?;
                     return Ok(proposed(&doc, op));
                 }
                 Some(doc) => doc.replace(a.source, 0),
@@ -607,7 +625,8 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
             let a: ReplaceArg = parse(&args)?;
             let d = doc(app, &a.deck)?;
             if d.review() {
-                let op = d.propose(Kind::Replace, Some(a.slide), false, a.source, a.note)?;
+                let t = thread_for(&thread, &a.deck);
+                let op = d.propose(Kind::Replace, Some(a.slide), false, a.source, a.note, t)?;
                 return Ok(proposed(&d, op));
             }
             let deck = d.update(0, |t| replace_slide(t, a.slide, &a.source))?;
@@ -617,7 +636,8 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
             let a: InsertArg = parse(&args)?;
             let d = doc(app, &a.deck)?;
             if d.review() {
-                let op = d.propose(Kind::Insert, Some(a.after), a.vertical, a.source, a.note)?;
+                let t = thread_for(&thread, &a.deck);
+                let op = d.propose(Kind::Insert, Some(a.after), a.vertical, a.source, a.note, t)?;
                 return Ok(proposed(&d, op));
             }
             let deck = d.update(0, |t| insert_slide(t, a.after, &a.source, a.vertical))?;
@@ -627,7 +647,8 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
             let a: SlideArg = parse(&args)?;
             let d = doc(app, &a.deck)?;
             if d.review() {
-                let op = d.propose(Kind::Delete, Some(a.slide), false, String::new(), a.note)?;
+                let t = thread_for(&thread, &a.deck);
+                let op = d.propose(Kind::Delete, Some(a.slide), false, String::new(), a.note, t)?;
                 return Ok(proposed(&d, op));
             }
             let deck = d.update(0, |t| delete_slide(t, a.slide))?;
@@ -659,7 +680,7 @@ async fn tools_call(app: &Shared, params: Value) -> Result<Value, String> {
             if !d.review() {
                 return Ok(json!({ "changeset": Value::Null, "message": "review mode is off: writes apply directly, there is nothing to group" }));
             }
-            let id = d.open_changeset(title, note);
+            let id = d.open_changeset(title, note, thread_for(&thread, &a.deck), Vec::new());
             Ok(json!({ "changeset": id, "message": "open: writes to this deck now join this changeset" }))
         }
         "withdraw_proposal" => {

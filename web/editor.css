@@ -56,6 +56,27 @@ header button.ask { background: #b58900; color: #fdf6e3; border-color: #b58900; 
 .msg.live { align-self: flex-start; color: #b58900; font-style: italic; }
 .msg.draft { opacity: .7; white-space: pre-wrap; }
 #ask-form select { font-size: .8em; padding: .15rem .3rem; }
+/* the Ask inbox: one row per thread, several may be running */
+#threads { flex: 1; overflow-y: auto; padding: .4rem .6rem; display: flex; flex-direction: column; gap: .35rem; }
+#threads .empty { color: #93a1a1; }
+.thread { border: 1px solid #d9d2bd; border-radius: 6px; background: #fff; padding: .4rem .6rem; cursor: pointer; display: flex; flex-direction: column; gap: .15rem; }
+.thread:hover { border-color: #b58900; }
+.thread .t-head { display: flex; gap: .4rem; align-items: baseline; }
+.thread .t-title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread.merge .t-title::before { content: "✦ "; color: #b58900; }
+.thread .t-status { font-size: .78em; color: #93a1a1; white-space: nowrap; }
+.thread.running .t-status { color: #b58900; font-style: italic; }
+.thread.running .t-status::before { content: "● "; animation: pulse 1.2s infinite; }
+.thread.error .t-status { color: #dc322f; }
+.thread .t-snippet { font-size: .85em; color: #586e75; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.thread .t-pending { font-size: .75em; padding: 0 .4em; border-radius: 1em; background: #b58900; color: #fff; }
+.thread .t-pending.conflict { background: #cb4b16; }
+@keyframes pulse { 50% { opacity: .3; } }
+#thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.thread-head { border-bottom: 1px solid #d9d2bd; background: #eee8d5; }
+.thread-head #thread-back { background: transparent; border-color: transparent; }
+.thread-head #thread-title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-head #thread-close { background: transparent; border-color: transparent; color: #93a1a1; }
 .msg.error { align-self: flex-start; background: #fdecec; color: #dc322f; }
 .msg code { background: #eee8d5; padding: 0 .25em; border-radius: 3px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .9em; }
 #ask-form { flex-direction: column; align-items: stretch; gap: 0; margin: 0; border-top: 1px solid #d9d2bd; }
@@ -89,6 +110,17 @@ header button.ask { background: #b58900; color: #fdf6e3; border-color: #b58900; 
 .op .where { font-weight: 600; }
 .op .pill { margin-left: auto; font-size: .75em; padding: 0 .4em; border-radius: 1em; background: #b58900; color: #fff; }
 .op .pill.accepted { background: #859900; } .op .pill.rejected { background: #93a1a1; } .op .pill.stale { background: #dc322f; }
+.op .pill.merged { background: #6c71c4; } .op .pill.conflict { background: #cb4b16; }
+.op.merged { opacity: .6; }
+.op.conflict { border-color: #cb4b16; }
+/* a conflict: another writer's op on the same slide; merge is the way out we prefer */
+.op .conflict-box { padding: .35rem .6rem; background: #fdf1e8; border-top: 1px solid #f3d3bd; font-size: .85em; color: #7a3a10; }
+.op .conflict-box .rival { color: #cb4b16; text-decoration: underline dotted; cursor: pointer; }
+.op .conflict-box .row { padding: .3rem 0 0; gap: .3rem; flex-wrap: wrap; }
+button.merge { background: #b58900; color: #fff; border-color: #b58900; }
+#cmp-merge.merge { background: #b58900; color: #fff; border-color: #b58900; }
+.cs-head .cs-counts .conflict { color: #cb4b16; font-weight: 600; }
+#pcount.warn, #pcount2.warn { background: #cb4b16; }
 .op .note { padding: .35rem .6rem; color: #586e75; font-style: italic; }
 .op .comment { padding: .3rem .6rem; background: #fdf6e3; border-top: 1px dashed #d9d2bd; }
 .thumb { position: relative; width: 100%; aspect-ratio: 16 / 10; overflow: hidden; background: #fff; border-bottom: 1px solid #eee8d5; }

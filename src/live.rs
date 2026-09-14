@@ -26,8 +26,10 @@
 //!                                                   Monaco's content changes (UTF-16 offsets, each
 //!                                                   relative to the text before the whole batch) and
 //!                                                   an FNV-1a hash of the resulting text
-//!   {"type":"view","proposed"}                      preview switch: patch from the proposed deck
-//!                                                   (current text + pending proposal) or the real one
+//!   {"type":"view","proposed","op"?}                preview switch: patch from the proposed deck
+//!                                                   (current text + pending proposal) or the real one;
+//!                                                   with `op`, the deck with just that pending op applied
+//!                                                   (how a conflicted op is shown — review.rs)
 //! ```
 //!
 //! Patches are positional: a connection remembers the deck it last sent and a
@@ -283,7 +285,11 @@ pub fn fnv1a(s: &str) -> u32 {
 enum ClientMsg {
     Sync,
     Edit { changes: Vec<Edit>, hash: u32 },
-    View { proposed: bool },
+    View {
+        proposed: bool,
+        #[serde(default)]
+        op: Option<u32>,
+    },
 }
 
 #[derive(Serialize)]
@@ -361,7 +367,16 @@ async fn run(socket: WebSocket, doc: Doc) -> Result<(), axum::Error> {
     let (mut sink, mut stream) = socket.split();
     let mut editor = false;
     let mut proposed_view = false;
+    let mut op_view: Option<u32> = None;
     let mut prev = Arc::new(Deck::default());
+    // The deck this connection's preview shows, by its `view` setting.
+    let shown = |doc: &Doc, proposed: bool, op: Option<u32>, fallback: Option<Arc<Deck>>| -> Arc<Deck> {
+        match (op, proposed) {
+            (Some(id), _) => doc.deck_for_op(id).unwrap_or_else(|| doc.deck()),
+            (None, true) => fallback.or_else(|| doc.proposed()).unwrap_or_else(|| doc.deck()),
+            (None, false) => doc.deck(),
+        }
+    };
     let deck = doc.deck();
     sink.send(message(&patch(&prev, &deck, true))).await?;
     prev = deck;
@@ -377,9 +392,10 @@ async fn run(socket: WebSocket, doc: Doc) -> Result<(), axum::Error> {
                         sink.send(message(&ServerMsg::Text { text: &doc.text() })).await?;
                         sink.send(message(&ServerMsg::State { state: &doc.state_view() })).await?;
                     }
-                    Ok(ClientMsg::View { proposed }) => {
+                    Ok(ClientMsg::View { proposed, op }) => {
                         proposed_view = proposed;
-                        let deck = if proposed { doc.proposed().unwrap_or_else(|| doc.deck()) } else { doc.deck() };
+                        op_view = op;
+                        let deck = shown(&doc, proposed, op, None);
                         sink.send(message(&patch(&prev, &deck, !editor))).await?;
                         prev = deck;
                     }
@@ -400,19 +416,23 @@ async fn run(socket: WebSocket, doc: Doc) -> Result<(), axum::Error> {
                                 Change::Text(text) => ServerMsg::Text { text },
                             })).await?;
                         }
-                        let shown = if proposed_view { proposed.as_ref().unwrap_or(deck) } else { deck };
-                        sink.send(message(&patch(&prev, shown, !editor))).await?;
-                        prev = shown.clone();
+                        let show = if op_view.is_some() || proposed_view {
+                            shown(&doc, proposed_view, op_view, proposed.clone())
+                        } else {
+                            deck.clone()
+                        };
+                        sink.send(message(&patch(&prev, &show, !editor))).await?;
+                        prev = show;
                     }
                     Update::Saved(error) => sink.send(message(&ServerMsg::Saved { error })).await?,
                     Update::Proposal { deck, view } => {
                         if editor {
                             sink.send(message(&ServerMsg::State { state: view })).await?;
                         }
-                        if proposed_view {
-                            let shown = deck.clone().unwrap_or_else(|| doc.deck());
-                            sink.send(message(&patch(&prev, &shown, !editor))).await?;
-                            prev = shown;
+                        if proposed_view || op_view.is_some() {
+                            let show = shown(&doc, proposed_view, op_view, deck.clone());
+                            sink.send(message(&patch(&prev, &show, !editor))).await?;
+                            prev = show;
                         }
                     }
                     Update::Agent(event) => {

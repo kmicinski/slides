@@ -16,14 +16,17 @@ export interface OpView {
   source: string;
   current: string | null;
   note: string;
-  status: "pending" | "accepted" | "rejected";
+  status: "pending" | "accepted" | "rejected" | "merged";
   stale: boolean;
   comment: string;
+  /** Where the op's result lands: in the proposed deck, or — when in conflict — in the deck with just this op applied (`view=op`). */
   proposed_slide: number | null;
   proposed_col: number;
   proposed_row: number;
   /** The changeset this op belongs to. */
   changeset: number;
+  /** Other writers' pending ops on the same slide; empty when there is no conflict. */
+  conflicts: number[];
 }
 /** A batch of ops reviewed together (src/review.rs `Changeset`), with its counts. */
 export interface ChangesetView {
@@ -33,23 +36,41 @@ export interface ChangesetView {
   created: number;
   /** Still taking writes from the tool that opened it. */
   open: boolean;
+  /** The agent thread writing it; null for a remote session. */
+  thread: number | null;
+  /** A merge changeset: the ops it reconciles. */
+  merges: number[];
   ops: number;
-  /** Pending and mergeable. */
+  /** Pending and mergeable (conflicted ones included). */
   pending: number;
   stale: number;
+  conflicted: number;
   accepted: number;
   rejected: number;
+  merged: number;
 }
 export interface AgentMsg { role: string; text: string; ts: number }
+/** One conversation with the agent (src/review.rs `Thread`); several can run at once. */
+export interface ThreadView {
+  id: number;
+  title: string;
+  session: string | null;
+  messages: AgentMsg[];
+  created: number;
+  merge: boolean;
+  running: boolean;
+}
 export interface StateView {
   review: boolean;
   proposal: { id: string; created: number } | null;
   changesets: ChangesetView[];
   ops: OpView[];
   pending: number;
-  agent: { session: string | null; messages: AgentMsg[] };
+  /** Pending ops in conflict with another. */
+  conflicts: number;
+  agent: { threads: ThreadView[] };
 }
-export interface AgentEvent { kind: "start" | "text" | "tool" | "error" | "done" | "phase" | "delta"; text?: string; model?: string; effort?: string }
+export interface AgentEvent { kind: "start" | "text" | "tool" | "error" | "done" | "phase" | "delta"; thread: number; text?: string; model?: string; effort?: string }
 
 export type ServerMsg =
   | { type: "text"; text: string }
@@ -62,7 +83,7 @@ export type ServerMsg =
 export type ClientMsg =
   | { type: "sync" }
   | { type: "edit"; changes: Edit[]; hash: number }
-  | { type: "view"; proposed: boolean };
+  | { type: "view"; proposed: boolean; op?: number };
 
 export function socketUrl(): string {
   const deck = location.pathname.split("/")[2]; // /deck/<name>/live or /edit/<name>

@@ -80,6 +80,7 @@ function apply(cols: PatchSlide[][]) {
 
 let ws: WebSocket | null = null;
 let proposed = false; // which deck this preview shows (see `view` in src/live.rs)
+let viewOp: number | undefined; // …or the deck with just this pending op applied (a conflicted op)
 // Patches we asked for and have not applied yet: the one every connection
 // opens with, and one per `view` switch. A `goto` that arrives meanwhile is
 // parked until they land — its indices refer to the deck we asked for, which
@@ -95,13 +96,13 @@ function goto(h: number, v: number) {
 function askView() {
   if (ws?.readyState !== WebSocket.OPEN) return; // onopen sends it
   awaiting++;
-  ws.send(JSON.stringify({ type: "view", proposed }));
+  ws.send(JSON.stringify({ type: "view", proposed, op: viewOp }));
 }
 
 function connect() {
   awaiting = 1;
   ws = new WebSocket(socketUrl());
-  ws.onopen = () => { if (proposed) askView(); };
+  ws.onopen = () => { if (proposed || viewOp !== undefined) askView(); };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data) as ServerMsg;
     if (m.type === "patch") apply(m.cols);
@@ -114,6 +115,7 @@ window.addEventListener("message", (e) => {
   if (e.data?.type === "goto") goto(Number(e.data.h) || 0, Number(e.data.v) || 0);
   if (e.data?.type === "view") {
     proposed = !!e.data.proposed;
+    viewOp = typeof e.data.op === "number" ? e.data.op : undefined;
     askView();
   }
 });

@@ -102,9 +102,10 @@ pub async fn editor(
 <main>
 <div id="editor"></div><div id="divider"></div>
 <div id="preview-pane">
-  <div id="compare-bar" hidden title="keys: n / p next and previous · a accept · A accept the whole changeset · r reject · c comment · esc close">
+  <div id="compare-bar" hidden title="keys: n / p next and previous · a accept · A accept the whole changeset · r reject · c comment · in a conflict: m merge with AI, k keep this, o keep the other · esc close">
     <button id="cmp-prev" title="previous (p)">◀</button><span id="cmp-pos" class="pos"></span><button id="cmp-next" title="next (n)">▶</button>
     <span id="cmp-title" class="title"></span><span class="spacer"></span>
+    <button id="cmp-merge" class="merge" hidden title="have the agent merge the conflicting proposals into one (m)">✦ merge</button><button id="cmp-keep" hidden title="keep this proposal, drop the conflicting one (k)">keep this</button><button id="cmp-keep-other" hidden title="keep the conflicting proposal, drop this one (o)">keep other</button>
     <button id="cmp-accept" class="accept" title="accept this slide (a)">accept</button><button id="cmp-accept-all" class="accept" title="accept every pending slide in this changeset (A)">accept all</button><button id="cmp-reject" title="reject (r)">reject</button><button id="cmp-comment" title="comment (c)">comment</button><button id="cmp-close" title="back to the single preview (esc)">×</button>
   </div>
   <div id="panes">
@@ -116,13 +117,17 @@ pub async fn editor(
 <aside id="drawer" hidden>
   <nav><button data-tab="ask" class="active">✦ Ask</button><button data-tab="review">Review <span id="pcount" class="count" hidden></span></button><span class="spacer"></span><button id="drawer-close" title="close">×</button></nav>
   <section id="tab-ask">
-    <div id="transcript"></div>
+    <div id="threads"></div>
+    <div id="thread" hidden>
+      <div class="row thread-head"><button id="thread-back" title="back to all questions">‹ all</button><span id="thread-title"></span><span class="spacer"></span><button type="button" id="thread-stop" hidden>stop</button><button type="button" id="thread-close" title="drop this thread (its proposals stay)">×</button></div>
+      <div id="transcript"></div>
+    </div>
     <form id="ask-form">
-      <textarea id="ask-input" rows="3" placeholder="What should change? Enter sends, Shift+Enter for a newline."></textarea>
+      <textarea id="ask-input" rows="3" placeholder="Ask for a change — several questions can run at once. Enter sends, Shift+Enter for a newline."></textarea>
       <div class="row"><span id="ask-context" class="muted"></span><span class="spacer"></span>
         <select id="ask-model" title="model"><option value="">default model</option><option value="claude-fable-5-1">fable 5.1</option><option value="claude-opus-5">opus 5</option><option value="claude-sonnet-5">sonnet 5</option></select>
         <select id="ask-effort" title="effort: how long the model thinks"><option value="low">quick</option><option value="medium">normal</option><option value="high">careful</option><option value="xhigh">thorough</option></select>
-        <button type="button" id="ask-stop" hidden>stop</button><button type="button" id="ask-new" title="start a fresh conversation">new</button><button type="submit" id="ask-send">send</button></div>
+        <button type="button" id="ask-new" title="drop every thread and start over">clear all</button><button type="submit" id="ask-send">send</button></div>
     </form>
   </section>
   <section id="tab-review" hidden>
@@ -155,6 +160,9 @@ pub struct ThumbQuery {
     #[serde(default)]
     view: String,
     slide: usize,
+    /// With `view=op`: the pending op to apply on its own (a conflicted op's preview).
+    #[serde(default)]
+    op: Option<u32>,
 }
 
 /// One slide, current or proposed deck, as a chrome-less player (`player::thumb`).
@@ -168,6 +176,7 @@ pub async fn thumb(
         .ok_or((StatusCode::NOT_FOUND, "no such deck".into()))?;
     let deck = match q.view.as_str() {
         "proposed" => doc.proposed().unwrap_or_else(|| doc.deck()),
+        "op" => q.op.and_then(|id| doc.deck_for_op(id)).unwrap_or_else(|| doc.deck()),
         _ => doc.deck(),
     };
     let slide = deck
